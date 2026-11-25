@@ -1,91 +1,88 @@
-"""Startup animations for the G915 X keyboard.
+"""Animations for the G915 X keyboard.
 
-Each animation is a function that takes a G915XBackend, primary color,
-and secondary color, then plays a visual effect before the profile
-colors are applied.
+Every animation is a generator yielding ``(frame, dt)`` at a uniform
+**30 FPS** with continuous phase math, so:
+
+* ambient mode loops cleanly without hard resets,
+* mid-flight cfg edits (color sliders, speed, intensity) take effect on
+  the very next frame because the loop bodies re-read ``cfg`` per frame,
+* the runner can play any animation as a one-shot by capping it on
+  elapsed seconds.
+
+The :class:`AnimationRunner` consumes a stream against an ``on_frame``
+callback. ``play(..., loop=True)`` keeps it running forever (ambient);
+``play(..., duration=N)`` stops automatically after N seconds (startup).
 """
+
+from __future__ import annotations
 
 import math
 import random
+import threading
 import time
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
 
-from .backend import G915XBackend
 from .keyboard_layout import G915X_KEYS
 
-# --- Animation registry ---
+# --- Types ---
 
-ANIMATIONS: dict[str, tuple[str, callable]] = {}
+RGB = tuple[int, int, int]
+Frame = dict[int, RGB]
+FrameStream = Iterator[tuple[Frame, float]]
+
+
+@dataclass
+class AnimationConfig:
+    """Tunable parameters threaded through every animation.
+
+    The dataclass is **mutable**: animations re-read these fields each
+    frame, so updates from the GUI take effect without restarting the
+    runner.
+    """
+
+    primary: RGB = (0x00, 0x80, 0xFF)
+    secondary: RGB = (0xFF, 0x40, 0x80)
+    speed: float = 1.0          # >1 = faster phase, <1 = slower
+    intensity: float = 1.0      # output brightness multiplier (0..2)
+    palette: list[RGB] = field(default_factory=list)
+
+
+AnimationFactory = Callable[[AnimationConfig], FrameStream]
+
+
+# --- Registry ---
+
+ANIMATIONS: dict[str, tuple[str, AnimationFactory]] = {}
 
 
 def register(name: str, description: str):
-    def decorator(func):
+    def decorator(func: AnimationFactory) -> AnimationFactory:
         ANIMATIONS[name] = (description, func)
         return func
     return decorator
-
-
-def play_animation(name: str, kb: G915XBackend, profile=None) -> None:
-    if name and name in ANIMATIONS:
-        _, func = ANIMATIONS[name]
-        primary = getattr(profile, 'animation_primary', (0, 128, 255)) if profile else (0, 128, 255)
-        secondary = getattr(profile, 'animation_secondary', (255, 64, 128)) if profile else (255, 64, 128)
-        func(kb, primary, secondary)
 
 
 def get_animation_choices() -> list[tuple[str, str]]:
     return [(name, desc) for name, (desc, _) in ANIMATIONS.items()]
 
 
-# --- Helpers ---
+# --- Constants & helpers ---
 
-ALL_KEYS = [k.address for k in G915X_KEYS]
-OFF = (0x00, 0x00, 0x00)
-
-
-def _sc(kb, addr, r, g, b):
-    """Set key color and commit."""
-    kb.set_key_color(addr, r, g, b)
-    kb.commit()
-
-
-def _set_many(kb, addrs, r, g, b):
-    """Set multiple keys to same color and commit after all."""
-    for addr in addrs:
-        kb.set_key_color(addr, r, g, b)
-        kb.commit()
+ALL_KEYS: list[int] = [k.address for k in G915X_KEYS]
+OFF: RGB = (0, 0, 0)
+# 15 FPS: the device firmware can't keep up with all-keys-changed frames
+# at 30 FPS — its HID write buffer saturates after a few seconds and
+# everything stalls. 15 FPS is the upper bound the original code happened
+# to land on for full-keyboard animations like aurora/helix/ripple.
+DT = 1.0 / 15.0
 
 
-def _fade(kb, addrs, color, steps=4, duration=0.3):
-    """Fade keys from color to off."""
-    r, g, b = color
-    dt = duration / steps
-    for i in range(steps, 0, -1):
-        f = i / steps
-        for addr in addrs:
-            kb.set_key_color(addr, int(r * f), int(g * f), int(b * f))
-            kb.commit()
-        time.sleep(dt)
-    _set_many(kb, addrs, *OFF)
+def all_off_frame() -> Frame:
+    return {a: OFF for a in ALL_KEYS}
 
 
-def _keys_by_column():
-    columns: dict[float, list[int]] = {}
-    for key in G915X_KEYS:
-        col = round(key.x * 2) / 2
-        columns.setdefault(col, []).append(key.address)
-    return columns
-
-
-def _keys_by_row():
-    rows: dict[float, list[int]] = {}
-    for key in G915X_KEYS:
-        row_y = round(key.y * 2) / 2
-        rows.setdefault(row_y, []).append(key.address)
-    return rows
-
-
-def _lerp(c1, c2, t):
-    """Blend two RGB colors. t=0 gives c1, t=1 gives c2."""
+def _lerp(c1: RGB, c2: RGB, t: float) -> RGB:
     t = max(0.0, min(1.0, t))
     return (
         int(c1[0] + (c2[0] - c1[0]) * t),
@@ -94,8 +91,7 @@ def _lerp(c1, c2, t):
     )
 
 
-def _dim(c, f):
-    """Scale color brightness by factor f (0.0-1.0+)."""
+def _dim(c: RGB, f: float) -> RGB:
     return (
         min(255, max(0, int(c[0] * f))),
         min(255, max(0, int(c[1] * f))),
@@ -103,603 +99,556 @@ def _dim(c, f):
     )
 
 
-def _center():
-    """Return (cx, cy) center of keyboard."""
-    cx = sum(k.x + k.w / 2 for k in G915X_KEYS) / len(G915X_KEYS)
-    cy = sum(k.y + k.h / 2 for k in G915X_KEYS) / len(G915X_KEYS)
-    return cx, cy
+def _scale_frame(frame: Frame, intensity: float) -> Frame:
+    if intensity == 1.0:
+        return frame
+    return {a: _dim(c, intensity) for a, c in frame.items()}
 
 
-def _apply_frame(kb, new_frame, prev_frame):
-    """Apply only the diff between frames for efficiency."""
-    diff = {a: rgb for a, rgb in new_frame.items() if prev_frame.get(a) != rgb}
-    if diff:
-        kb.apply_key_colors(diff)
-    return dict(new_frame)
+# Pre-computed spatial info — built once at import.
+_KX: dict[int, float] = {k.address: k.x + k.w / 2 for k in G915X_KEYS}
+_KY: dict[int, float] = {k.address: k.y + k.h / 2 for k in G915X_KEYS}
+_X_MIN = min(_KX.values())
+_X_MAX = max(_KX.values())
+_Y_MIN = min(_KY.values())
+_Y_MAX = max(_KY.values())
+_CX = (_X_MIN + _X_MAX) / 2
+_CY = (_Y_MIN + _Y_MAX) / 2
+_MAX_RADIUS = math.hypot(_X_MAX - _CX, _Y_MAX - _CY)
+
+_COLUMNS: dict[float, list[int]] = {}
+for _k in G915X_KEYS:
+    _COLUMNS.setdefault(round(_k.x * 2) / 2, []).append(_k.address)
+_SORTED_COLS: list[float] = sorted(_COLUMNS)
+
+_ROWS: dict[float, list[int]] = {}
+for _k in G915X_KEYS:
+    _ROWS.setdefault(round(_k.y * 2) / 2, []).append(_k.address)
+_SORTED_ROWS: list[float] = sorted(_ROWS)
+
+
+def _step(phase: float, speed: float, rate: float) -> float:
+    """Advance ``phase`` by one 30 FPS tick at the given rate × speed."""
+    return phase + DT * max(0.05, speed) * rate
 
 
 # =====================================================================
-# NEW CREATIVE ANIMATIONS
+# Animation implementations — all infinite-loop, all 30 FPS
 # =====================================================================
 
 @register("aurora", "Aurora borealis — flowing curtains of light")
-def anim_aurora(kb: G915XBackend, primary, secondary) -> None:
-    kb.set_all_keys(0, 0, 0)
-    time.sleep(0.15)
-    prev = {}
-    for frame in range(45):
-        t = frame * 0.15
-        new_frame = {}
-        for key in G915X_KEYS:
-            kx = key.x + key.w / 2
-            ky = key.y + key.h / 2
-            # Y-based primary/secondary blend
+def aurora(cfg: AnimationConfig) -> FrameStream:
+    phase = 0.0
+    while True:
+        primary, secondary = cfg.primary, cfg.secondary
+        f: Frame = {}
+        for a, kx in _KX.items():
+            ky = _KY[a]
             y_blend = max(0.0, min(1.0, (ky + 0.5) / 6.0))
             base = _lerp(primary, secondary, y_blend)
-            # Two sine waves at different frequencies for shimmer
-            wave1 = math.sin(kx * 0.4 + t) * 0.5 + 0.5
-            wave2 = math.sin(kx * 0.7 - t * 1.3 + ky * 0.3) * 0.5 + 0.5
-            brightness = wave1 * 0.6 + wave2 * 0.4
-            # Extra shimmer
-            shimmer = math.sin(kx * 1.5 + t * 3.0) * 0.15 + 0.85
-            brightness *= shimmer
-            new_frame[key.address] = _dim(base, brightness)
-        prev = _apply_frame(kb, new_frame, prev)
-        time.sleep(0.07)
-    # Fade out
-    for step in range(5, 0, -1):
-        f = step / 5
-        faded = {a: _dim(c, f) for a, c in prev.items()}
-        prev = _apply_frame(kb, faded, prev)
-        time.sleep(0.08)
-    kb.set_all_keys(0, 0, 0)
+            wave1 = math.sin(kx * 0.4 + phase) * 0.5 + 0.5
+            wave2 = math.sin(kx * 0.7 - phase * 1.3 + ky * 0.3) * 0.5 + 0.5
+            shimmer = math.sin(kx * 1.5 + phase * 3.0) * 0.15 + 0.85
+            brightness = (wave1 * 0.6 + wave2 * 0.4) * shimmer
+            f[a] = _dim(base, brightness)
+        yield f, DT
+        phase = _step(phase, cfg.speed, 2.0)
 
 
 @register("comet", "Twin comets — streaks of light crossing paths")
-def anim_comet(kb: G915XBackend, primary, secondary) -> None:
-    columns = _keys_by_column()
-    sorted_cols = sorted(columns.keys())
-    n = len(sorted_cols)
+def comet(cfg: AnimationConfig) -> FrameStream:
+    n = len(_SORTED_COLS)
     trail = 6
-
-    kb.set_all_keys(0, 0, 0)
-    time.sleep(0.15)
-
-    prev = {}
-    for frame in range(n + trail + 4):
-        new_frame = {}
-        for i, col_x in enumerate(sorted_cols):
-            # Primary comet: left to right
-            dist_p = frame - i
-            # Secondary comet: right to left
-            dist_s = frame - (n - 1 - i)
-
-            color = OFF
-            for d, col, base in [(dist_p, primary, 0), (dist_s, secondary, 0)]:
+    cycle = n + trail + 4
+    phase = 0.0
+    while True:
+        primary, secondary = cfg.primary, cfg.secondary
+        head = phase % cycle
+        f: Frame = {}
+        for i, col_x in enumerate(_SORTED_COLS):
+            dp = head - i
+            ds = head - (n - 1 - i)
+            color: RGB = OFF
+            for d, col in [(dp, primary), (ds, secondary)]:
                 if 0 <= d < trail:
-                    brightness = 1.0 - d / trail
-                    c = (255, 255, 255) if d == 0 else _dim(col, brightness)
-                    if color == OFF:
-                        color = c
-                    else:
-                        # Blend overlapping comets
-                        color = _lerp(color, c, 0.5)
-
-            for addr in columns[col_x]:
-                new_frame[addr] = color
-
-        prev = _apply_frame(kb, new_frame, prev)
-        time.sleep(0.055)
-
-    kb.set_all_keys(0, 0, 0)
+                    bright = 1.0 - d / trail
+                    c = (255, 255, 255) if d < 0.5 else _dim(col, bright)
+                    color = c if color == OFF else _lerp(color, c, 0.5)
+            for addr in _COLUMNS[col_x]:
+                f[addr] = color
+        yield f, DT
+        phase = _step(phase, cfg.speed, 18.0)
 
 
 @register("ripple", "Concentric ripples — waves from the center")
-def anim_ripple(kb: G915XBackend, primary, secondary) -> None:
-    cx, cy = _center()
-    max_d = max(((k.x + k.w/2 - cx)**2 + (k.y + k.h/2 - cy)**2)**0.5 for k in G915X_KEYS)
-
-    kb.set_all_keys(0, 0, 0)
-    time.sleep(0.15)
-
+def ripple(cfg: AnimationConfig) -> FrameStream:
     ring_width = 2.0
-    wave_speed = 0.8
-    prev = {}
-    for frame in range(40):
-        t = frame * wave_speed
-        new_frame = {}
-        for key in G915X_KEYS:
-            kx = key.x + key.w / 2
-            ky = key.y + key.h / 2
-            d = ((kx - cx)**2 + (ky - cy)**2)**0.5
-
-            brightness = 0.0
-            best_color = primary
-            # Three waves, offset in time
-            for wave_i in range(3):
-                wave_front = t - wave_i * 3.0
-                ring_dist = abs(d - wave_front)
-                if ring_dist < ring_width:
-                    b = (1.0 - ring_dist / ring_width) ** 2
-                    if b > brightness:
-                        brightness = b
-                        best_color = primary if wave_i % 2 == 0 else secondary
-
-            new_frame[key.address] = _dim(best_color, brightness) if brightness > 0.02 else OFF
-        prev = _apply_frame(kb, new_frame, prev)
-        time.sleep(0.07)
-    kb.set_all_keys(0, 0, 0)
+    phase = 0.0
+    while True:
+        primary, secondary = cfg.primary, cfg.secondary
+        f: Frame = {}
+        for a, kx in _KX.items():
+            ky = _KY[a]
+            d = math.hypot(kx - _CX, ky - _CY)
+            best_b = 0.0
+            best_c = primary
+            for w_i in range(3):
+                front = phase - w_i * 3.0
+                rd = abs(d - front)
+                if rd < ring_width:
+                    b = (1.0 - rd / ring_width) ** 2
+                    if b > best_b:
+                        best_b = b
+                        best_c = primary if w_i % 2 == 0 else secondary
+            f[a] = _dim(best_c, best_b) if best_b > 0.02 else OFF
+        yield f, DT
+        # Wrap so ambient never drifts to huge phase numbers.
+        phase = _step(phase, cfg.speed, 4.0) % 60.0
 
 
 @register("helix", "Double helix — intertwined sine waves")
-def anim_helix(kb: G915XBackend, primary, secondary) -> None:
-    kb.set_all_keys(0, 0, 0)
-    time.sleep(0.15)
-
-    cy = 3.0  # vertical center
-    amplitude = 2.5
-    prev = {}
-    for frame in range(40):
-        phase = frame * 0.25
-        new_frame = {}
-        for key in G915X_KEYS:
-            kx = key.x + key.w / 2
-            ky = key.y + key.h / 2
-            # Two strands
-            y1 = cy + amplitude * math.sin(kx * 0.5 + phase)
-            y2 = cy + amplitude * math.sin(kx * 0.5 + phase + math.pi)
-            d1 = abs(ky - y1)
-            d2 = abs(ky - y2)
-            b1 = max(0, 1.0 - d1 / 1.2) ** 2
-            b2 = max(0, 1.0 - d2 / 1.2) ** 2
-
+def helix(cfg: AnimationConfig) -> FrameStream:
+    cy = 3.0
+    amp = 2.5
+    phase = 0.0
+    while True:
+        primary, secondary = cfg.primary, cfg.secondary
+        f: Frame = {}
+        for a, kx in _KX.items():
+            ky = _KY[a]
+            y1 = cy + amp * math.sin(kx * 0.5 + phase)
+            y2 = cy + amp * math.sin(kx * 0.5 + phase + math.pi)
+            b1 = max(0.0, 1.0 - abs(ky - y1) / 1.2) ** 2
+            b2 = max(0.0, 1.0 - abs(ky - y2) / 1.2) ** 2
             if b1 > 0.02 and b2 > 0.02:
-                # Crossover — blend to white
                 blend = min(b1, b2) / max(b1, b2)
-                color = _lerp(_lerp(primary, secondary, b2 / (b1 + b2)), (255, 255, 255), blend * 0.7)
-                brightness = max(b1, b2)
+                color = _lerp(_lerp(primary, secondary, b2 / (b1 + b2)),
+                              (255, 255, 255), blend * 0.7)
+                bright = max(b1, b2)
             elif b1 > 0.02:
-                color = primary
-                brightness = b1
+                color, bright = primary, b1
             elif b2 > 0.02:
-                color = secondary
-                brightness = b2
+                color, bright = secondary, b2
             else:
-                color = OFF
-                brightness = 0
-
-            new_frame[key.address] = _dim(color, brightness) if brightness > 0.02 else OFF
-        prev = _apply_frame(kb, new_frame, prev)
-        time.sleep(0.07)
-    kb.set_all_keys(0, 0, 0)
+                color, bright = OFF, 0.0
+            f[a] = _dim(color, bright) if bright > 0.02 else OFF
+        yield f, DT
+        phase = (phase + DT * max(0.05, cfg.speed) * 2.5) % (math.pi * 4)
 
 
-@register("prism", "Light prism — white beam splits into color spectrum")
-def anim_prism(kb: G915XBackend, primary, secondary) -> None:
-    kb.set_all_keys(0, 0, 0)
-    time.sleep(0.15)
-
-    prism_x = 6.0  # prism point ~1/4 across
-    max_x = max(k.x + k.w for k in G915X_KEYS)
-    min_y = min(k.y for k in G915X_KEYS)
-    max_y = max(k.y + k.h for k in G915X_KEYS)
-    beam_y = 3.0  # center row
-
-    prev = {}
-    # Phase 1: white beam enters (12 frames)
-    columns = _keys_by_column()
-    sorted_cols = sorted(columns.keys())
-    beam_cols = [c for c in sorted_cols if c <= prism_x]
-    for frame in range(len(beam_cols)):
-        new_frame = dict(prev)
-        col_x = beam_cols[frame]
-        for key in G915X_KEYS:
-            kx = key.x + key.w / 2
-            ky = key.y + key.h / 2
-            if abs(kx - col_x) < 0.8 and abs(ky - beam_y) < 1.2:
-                b = max(0, 1.0 - abs(ky - beam_y) / 1.2)
-                new_frame[key.address] = _dim((255, 255, 255), b)
-        prev = _apply_frame(kb, new_frame, prev)
-        time.sleep(0.04)
-
-    # Phase 2: fan out from prism (25 frames)
-    for frame in range(25):
-        reveal_x = prism_x + (frame / 24) * (max_x - prism_x)
-        new_frame = dict(prev)
-        for key in G915X_KEYS:
-            kx = key.x + key.w / 2
-            ky = key.y + key.h / 2
-            if kx > prism_x and kx <= reveal_x:
-                # Map Y position to primary-secondary blend
-                y_norm = (ky - min_y) / (max_y - min_y)
+@register("prism", "Light prism — beam splitting endlessly")
+def prism(cfg: AnimationConfig) -> FrameStream:
+    """Continuous version of the original prism — a perpetual light
+    beam striking the prism point and spraying spectral colors."""
+    prism_x = 6.0
+    max_x = _X_MAX
+    beam_y = 3.0
+    phase = 0.0
+    while True:
+        primary, secondary = cfg.primary, cfg.secondary
+        # Beam sweep position oscillates along the prism point's row.
+        beam_pulse = 0.5 + 0.5 * math.sin(phase)
+        f: Frame = {}
+        for a, kx in _KX.items():
+            ky = _KY[a]
+            if kx <= prism_x:
+                # Incoming white beam: bright on beam_y row, fading vertically.
+                vertical = max(0.0, 1.0 - abs(ky - beam_y) / 1.5)
+                horiz = max(0.0, 1.0 - (prism_x - kx) / prism_x)
+                f[a] = _dim((255, 255, 255), vertical * horiz * beam_pulse)
+            else:
+                # Spectral fan: y-blend × distance falloff × shimmer
+                y_norm = (ky - _Y_MIN) / max(_Y_MAX - _Y_MIN, 1.0)
                 color = _lerp(primary, secondary, y_norm)
-                # Brightness based on distance from prism
-                dist = kx - prism_x
-                b = min(1.0, 0.3 + dist / (max_x - prism_x) * 0.7)
-                new_frame[key.address] = _dim(color, b)
-        prev = _apply_frame(kb, new_frame, prev)
-        time.sleep(0.06)
-
-    time.sleep(0.4)
-    # Fade out
-    for step in range(5, 0, -1):
-        f = step / 5
-        faded = {a: _dim(c, f) for a, c in prev.items()}
-        prev = _apply_frame(kb, faded, prev)
-        time.sleep(0.08)
-    kb.set_all_keys(0, 0, 0)
+                dist_t = (kx - prism_x) / max(max_x - prism_x, 1.0)
+                shimmer = 0.7 + 0.3 * math.sin(phase * 2 + ky * 1.5)
+                f[a] = _dim(color, max(0.25, dist_t) * shimmer)
+        yield f, DT
+        phase = _step(phase, cfg.speed, 1.6)
 
 
 @register("pulse", "Breathing pulse — smooth color breathing")
-def anim_pulse(kb: G915XBackend, primary, secondary) -> None:
-    kb.set_all_keys(0, 0, 0)
-    time.sleep(0.1)
+def pulse(cfg: AnimationConfig) -> FrameStream:
+    phase = 0.0
+    while True:
+        primary, secondary = cfg.primary, cfg.secondary
+        # Slow alternation between primary and secondary on a sin curve.
+        mix = 0.5 + 0.5 * math.cos(phase * 0.5)
+        color = _lerp(primary, secondary, mix)
+        # Brightness breath sits on a faster cycle.
+        bright = 0.15 + 0.85 * (0.5 + 0.5 * math.sin(phase))
+        c = _dim(color, bright)
+        yield {a: c for a in ALL_KEYS}, DT
+        phase = _step(phase, cfg.speed, 2.5)
 
-    # Two full breaths: primary then secondary
-    for color in [primary, secondary, _lerp(primary, secondary, 0.5)]:
-        for frame in range(20):
-            t = frame / 19
-            brightness = math.sin(t * math.pi)  # 0 → 1 → 0
-            c = _dim(color, brightness)
-            kb.set_all_keys(*c)
-            time.sleep(0.055)
-    kb.set_all_keys(0, 0, 0)
+
+@register("cascade", "Waterfall cascade — color falling continuously")
+def cascade(cfg: AnimationConfig) -> FrameStream:
+    """Loopable cascade: rows perpetually shift through a primary→secondary
+    gradient that flows downward."""
+    n_rows = len(_SORTED_ROWS)
+    phase = 0.0
+    while True:
+        primary, secondary = cfg.primary, cfg.secondary
+        f: Frame = {}
+        for i, row_y in enumerate(_SORTED_ROWS):
+            t = ((i / max(n_rows - 1, 1)) + phase) % 1.0
+            color = _lerp(primary, secondary, t)
+            # Subtle row-edge highlight to evoke water sheet
+            highlight = 0.85 + 0.15 * math.sin(phase * 6 + i * 1.3)
+            for addr in _ROWS[row_y]:
+                f[addr] = _dim(color, highlight)
+        yield f, DT
+        phase = _step(phase, cfg.speed, 0.4)
 
 
-@register("cascade", "Waterfall cascade — color falls then pools upward")
-def anim_cascade(kb: G915XBackend, primary, secondary) -> None:
-    rows = _keys_by_row()
-    sorted_rows = sorted(rows.keys())
-    n_rows = len(sorted_rows)
+@register("vortex", "Spiral vortex — keys swirling around the center")
+def vortex(cfg: AnimationConfig) -> FrameStream:
+    phase = 0.0
+    angles: dict[int, float] = {
+        a: math.atan2(_KY[a] - _CY, _KX[a] - _CX)
+        for a in _KX
+    }
+    radii: dict[int, float] = {
+        a: math.hypot(_KX[a] - _CX, _KY[a] - _CY)
+        for a in _KX
+    }
+    while True:
+        primary, secondary = cfg.primary, cfg.secondary
+        f: Frame = {}
+        for a in _KX:
+            angle = angles[a] + phase
+            dist_t = radii[a] / max(_MAX_RADIUS, 0.001)
+            base = _lerp(primary, secondary, dist_t)
+            arm = 0.5 + 0.5 * math.sin(angle * 3 + phase * 2)
+            f[a] = _dim(base, 0.25 + 0.75 * arm)
+        yield f, DT
+        phase = _step(phase, cfg.speed, 1.8)
 
-    kb.set_all_keys(0, 0, 0)
-    time.sleep(0.15)
 
-    prev = {}
-    # Phase 1: Primary falls from top
-    for i in range(n_rows):
-        new_frame = dict(prev)
-        for j in range(i + 1):
-            brightness = 1.0 - (i - j) * 0.15
-            brightness = max(0.15, brightness)
-            for addr in rows[sorted_rows[j]]:
-                new_frame[addr] = _dim(primary, brightness)
-        prev = _apply_frame(kb, new_frame, prev)
-        time.sleep(0.12)
+@register("lightning", "Electric storm — random bolts on an ambient glow")
+def lightning(cfg: AnimationConfig) -> FrameStream:
+    """Loopable lightning: a low ambient glow with stochastic bolts that
+    stay bright for a few frames then fade."""
+    phase = 0.0
+    rng = random.Random(0xCAFEBABE)
+    bolt_keys: list[int] = []
+    bolt_age = 999
+    while True:
+        primary, secondary = cfg.primary, cfg.secondary
+        ambient = _dim(secondary, 0.12)
+        f: Frame = {a: ambient for a in ALL_KEYS}
 
-    time.sleep(0.15)
+        # Maybe spawn a new bolt
+        if bolt_age > 12 and rng.random() < 0.10:
+            bolt_age = 0
+            col_idx = rng.randint(2, len(_SORTED_COLS) - 3)
+            bolt_keys = []
+            for _ in _SORTED_ROWS:
+                col_idx = max(0, min(len(_SORTED_COLS) - 1,
+                                     col_idx + rng.randint(-2, 2)))
+                bolt_keys.extend(_COLUMNS[_SORTED_COLS[col_idx]])
+                if col_idx > 0:
+                    bolt_keys.extend(_COLUMNS[_SORTED_COLS[col_idx - 1]])
 
-    # Phase 2: Secondary pools upward from bottom
-    for i in range(n_rows):
-        new_frame = dict(prev)
-        row_idx = n_rows - 1 - i
-        # Blend: rows below are secondary, rows above stay primary
-        for j in range(n_rows):
-            if j >= row_idx:
-                blend = min(1.0, (j - row_idx + 1) / (n_rows - row_idx))
-                color = _lerp(primary, secondary, blend)
+        if bolt_age < 18:
+            if bolt_age < 2:
+                col = (255, 255, 255)
+            elif bolt_age < 6:
+                col = primary
             else:
-                color = _dim(primary, 0.6)
-            for addr in rows[sorted_rows[j]]:
-                new_frame[addr] = color
-        prev = _apply_frame(kb, new_frame, prev)
-        time.sleep(0.12)
+                col = _dim(primary, max(0.0, 1.0 - (bolt_age - 6) / 12.0))
+            for addr in bolt_keys:
+                f[addr] = col
 
-    time.sleep(0.2)
-    # Fade out
-    for step in range(5, 0, -1):
-        f = step / 5
-        faded = {a: _dim(c, f) for a, c in prev.items()}
-        prev = _apply_frame(kb, faded, prev)
-        time.sleep(0.08)
-    kb.set_all_keys(0, 0, 0)
+        yield f, DT
+        bolt_age += 1
+        phase = _step(phase, cfg.speed, 1.0)
 
 
-@register("vortex", "Spiral vortex — swirl from edges to center")
-def anim_vortex(kb: G915XBackend, primary, secondary) -> None:
-    cx, cy = _center()
-
-    def spiral_key(k):
-        dx = k.x + k.w / 2 - cx
-        dy = k.y + k.h / 2 - cy
-        angle = math.atan2(dy, dx)
-        dist = (dx**2 + dy**2) ** 0.5
-        return angle + dist * 0.5  # spiral ordering
-
-    by_spiral = sorted(G915X_KEYS, key=spiral_key)
-    max_d = max(((k.x + k.w/2 - cx)**2 + (k.y + k.h/2 - cy)**2)**0.5 for k in G915X_KEYS)
-
-    kb.set_all_keys(0, 0, 0)
-    time.sleep(0.15)
-
-    # Spiral in: secondary at edges → primary at center
-    chunk = max(len(by_spiral) // 25, 1)
-    prev = {}
-    for i in range(0, len(by_spiral), chunk):
-        batch = by_spiral[i:i + chunk]
-        new_frame = dict(prev)
-        t = i / len(by_spiral)
-        color = _lerp(secondary, primary, t)
-        for key in batch:
-            new_frame[key.address] = color
-        prev = _apply_frame(kb, new_frame, prev)
-        time.sleep(0.05)
-
-    # Flash
-    flash = _lerp(primary, (255, 255, 255), 0.5)
-    kb.apply_key_colors({a: flash for a in ALL_KEYS})
-    time.sleep(0.15)
-    kb.apply_key_colors({a: primary for a in ALL_KEYS})
-    time.sleep(0.2)
-
-    # Fade out
-    _fade(kb, ALL_KEYS, primary, steps=5, duration=0.5)
+@register("tide", "Ocean tide — sine-modulated waves washing across")
+def tide(cfg: AnimationConfig) -> FrameStream:
+    range_x = (_X_MAX - _X_MIN) + 6.0
+    phase = 0.0
+    while True:
+        primary, secondary = cfg.primary, cfg.secondary
+        wave_x = (phase % 1.0) * range_x + _X_MIN - 3.0
+        wave_color = primary if int(phase) % 2 == 0 else secondary
+        f: Frame = {}
+        for a, kx in _KX.items():
+            ky = _KY[a]
+            front = wave_x + math.sin(ky * 0.8) * 1.5
+            d = kx - front
+            if -1.5 < d < 0:
+                b = 1.0 - abs(d) / 1.5
+                f[a] = _lerp(wave_color, (255, 255, 255), b * 0.7)
+            elif -6 < d < -1.5:
+                b = max(0.1, 1.0 - (abs(d) - 1.5) / 4.5)
+                f[a] = _dim(wave_color, b)
+            else:
+                f[a] = OFF
+        yield f, DT
+        phase = _step(phase, cfg.speed, 0.35)
 
 
-@register("lightning", "Electric storm — jagged bolts of light")
-def anim_lightning(kb: G915XBackend, primary, secondary) -> None:
-    columns = _keys_by_column()
-    sorted_cols = sorted(columns.keys())
-    rows = _keys_by_row()
-    sorted_rows = sorted(rows.keys())
-
-    kb.set_all_keys(0, 0, 0)
-    time.sleep(0.15)
-
-    # Dim ambient glow
-    ambient = _dim(secondary, 0.15)
-    kb.apply_key_colors({a: ambient for a in ALL_KEYS})
-    time.sleep(0.2)
-
-    # 4 lightning bolts
-    for bolt in range(4):
-        # Generate jagged path: pick a starting column, zigzag down
-        col_idx = random.randint(3, len(sorted_cols) - 4)
-        bolt_keys = []
-        for row_y in sorted_rows:
-            col_idx = max(0, min(len(sorted_cols) - 1, col_idx + random.randint(-2, 2)))
-            bolt_keys.extend(columns[sorted_cols[col_idx]])
-            # Also light neighbors for thickness
-            if col_idx > 0:
-                bolt_keys.extend(columns[sorted_cols[col_idx - 1]])
-
-        # Flash white
-        flash_frame = {a: ambient for a in ALL_KEYS}
-        for addr in bolt_keys:
-            flash_frame[addr] = (255, 255, 255)
-        kb.apply_key_colors(flash_frame)
-        time.sleep(0.06)
-
-        # Flash primary
-        primary_frame = {a: ambient for a in ALL_KEYS}
-        for addr in bolt_keys:
-            primary_frame[addr] = primary
-        kb.apply_key_colors(primary_frame)
-        time.sleep(0.1)
-
-        # Glow around bolt in secondary
-        glow_frame = {a: ambient for a in ALL_KEYS}
-        for addr in bolt_keys:
-            glow_frame[addr] = _dim(primary, 0.4)
-        kb.apply_key_colors(glow_frame)
-        time.sleep(0.15)
-
-        # Back to ambient
-        kb.apply_key_colors({a: ambient for a in ALL_KEYS})
-        time.sleep(random.uniform(0.15, 0.35))
-
-    # Final flash — full keyboard
-    kb.apply_key_colors({a: (255, 255, 255) for a in ALL_KEYS})
-    time.sleep(0.08)
-    kb.apply_key_colors({a: primary for a in ALL_KEYS})
-    time.sleep(0.15)
-    _fade(kb, ALL_KEYS, primary, steps=4, duration=0.4)
-
-
-@register("tide", "Ocean tide — waves washing across")
-def anim_tide(kb: G915XBackend, primary, secondary) -> None:
-    max_x = max(k.x + k.w for k in G915X_KEYS)
-
-    kb.set_all_keys(0, 0, 0)
-    time.sleep(0.15)
-
-    prev = {}
-    # Two waves: primary then secondary
-    for wave_i, wave_color in enumerate([primary, secondary]):
-        speed = 0.8 if wave_i == 0 else 1.2
-        for frame in range(30):
-            wave_x = (frame / 29) * (max_x + 6) - 3
-            new_frame = {}
-            for key in G915X_KEYS:
-                kx = key.x + key.w / 2
-                ky = key.y + key.h / 2
-                # Wave shape: sine modulated front
-                wave_front = wave_x + math.sin(ky * 0.8) * 1.5
-                dist = kx - wave_front
-
-                if -1.5 < dist < 0:
-                    # Foam crest (white)
-                    b = 1.0 - abs(dist) / 1.5
-                    new_frame[key.address] = _lerp(wave_color, (255, 255, 255), b * 0.7)
-                elif -6 < dist < -1.5:
-                    # Wave body
-                    b = 1.0 - (abs(dist) - 1.5) / 4.5
-                    new_frame[key.address] = _dim(wave_color, max(0.1, b))
-                elif key.address in prev and prev[key.address] != OFF:
-                    # Receding: dim what was there
-                    new_frame[key.address] = _dim(prev.get(key.address, OFF), 0.85)
+@register("wave", "Color wave — sweeping across continuously")
+def wave(cfg: AnimationConfig) -> FrameStream:
+    n = len(_SORTED_COLS)
+    trail = 5
+    cycle = n + trail
+    phase = 0.0
+    while True:
+        primary, secondary = cfg.primary, cfg.secondary
+        head = phase % cycle
+        f: Frame = {a: OFF for a in ALL_KEYS}
+        for i, col_x in enumerate(_SORTED_COLS):
+            d = head - i
+            if -trail < d <= 0.5:
+                if d > -0.5:
+                    color = (255, 255, 255)
                 else:
-                    new_frame[key.address] = OFF
-
-            prev = _apply_frame(kb, new_frame, prev)
-            time.sleep(0.05)
-        time.sleep(0.1)
-
-    # Fade out
-    for step in range(5, 0, -1):
-        f = step / 5
-        faded = {a: _dim(c, f) for a, c in prev.items()}
-        prev = _apply_frame(kb, faded, prev)
-        time.sleep(0.08)
-    kb.set_all_keys(0, 0, 0)
-
-
-# =====================================================================
-# UPDATED GENERIC EFFECTS (with customizable colors)
-# =====================================================================
-
-@register("wave", "Color wave — sweeping left to right")
-def anim_wave(kb: G915XBackend, primary, secondary) -> None:
-    kb.set_all_keys(0, 0, 0)
-    time.sleep(0.2)
-
-    columns = _keys_by_column()
-    sorted_cols = sorted(columns.keys())
-
-    trail_len = 5
-    for i in range(len(sorted_cols) + trail_len + 2):
-        for t in range(trail_len):
-            col_idx = i - t
-            if 0 <= col_idx < len(sorted_cols):
-                col_x = sorted_cols[col_idx]
-                blend = col_idx / max(len(sorted_cols) - 1, 1)
-                base_color = _lerp(primary, secondary, blend)
-                fade = 1.0 - (t / trail_len) * 0.7
-                if t == 0:
-                    color = (255, 255, 255)  # bright head
-                else:
-                    color = _dim(base_color, fade)
-                _set_many(kb, columns[col_x], *color)
-
-        clear_idx = i - trail_len
-        if 0 <= clear_idx < len(sorted_cols):
-            _set_many(kb, columns[sorted_cols[clear_idx]], *OFF)
-        time.sleep(0.04)
-
-    _set_many(kb, ALL_KEYS, *OFF)
+                    blend = i / max(n - 1, 1)
+                    base = _lerp(primary, secondary, blend)
+                    fade = 1.0 - (-d / trail) * 0.7
+                    color = _dim(base, fade)
+                for addr in _COLUMNS[col_x]:
+                    f[addr] = color
+        yield f, DT
+        phase = _step(phase, cfg.speed, 14.0)
 
 
 @register("sparkle", "Sparkling keys — twinkling lights")
-def anim_sparkle(kb: G915XBackend, primary, secondary) -> None:
-    kb.set_all_keys(0, 0, 0)
-    time.sleep(0.2)
-
-    palette = [
-        primary, secondary,
-        _lerp(primary, secondary, 0.5),
-        _lerp(primary, (255, 255, 255), 0.5),
-        _lerp(secondary, (255, 255, 255), 0.5),
-        (255, 255, 255),
-    ]
-
+def sparkle(cfg: AnimationConfig) -> FrameStream:
+    rng = random.Random()
+    state: Frame = {a: OFF for a in ALL_KEYS}
     active: dict[int, int] = {}
-    for _ in range(60):
-        for _ in range(random.randint(2, 5)):
-            addr = random.choice(ALL_KEYS)
-            if addr not in active:
-                _sc(kb, addr, *random.choice(palette))
-                active[addr] = random.randint(2, 5)
+    while True:
+        primary, secondary = cfg.primary, cfg.secondary
+        palette = [
+            primary, secondary,
+            _lerp(primary, secondary, 0.5),
+            _lerp(primary, (255, 255, 255), 0.5),
+            _lerp(secondary, (255, 255, 255), 0.5),
+            (255, 255, 255),
+        ]
+
+        # Spawn rate scales with speed.
+        spawn = max(1, int(2 * max(0.5, cfg.speed)))
+        for _ in range(spawn):
+            if rng.random() < 0.7:
+                addr = rng.choice(ALL_KEYS)
+                if addr not in active:
+                    state[addr] = rng.choice(palette)
+                    active[addr] = rng.randint(4, 12)
 
         to_remove = []
-        for addr, ticks in active.items():
+        for addr, ticks in list(active.items()):
             if ticks <= 1:
-                _sc(kb, addr, *OFF)
+                state[addr] = OFF
                 to_remove.append(addr)
             else:
                 active[addr] = ticks - 1
-
         for addr in to_remove:
             del active[addr]
-        time.sleep(0.05)
 
-    for addr in list(active):
-        _sc(kb, addr, *OFF)
+        yield dict(state), DT
 
 
-@register("explosion", "Burst — expanding rings from center")
-def anim_explosion(kb: G915XBackend, primary, secondary) -> None:
-    kb.set_all_keys(0, 0, 0)
-    time.sleep(0.2)
-
-    cx, cy = _center()
-
-    def dist(k):
-        return ((k.x + k.w / 2 - cx) ** 2 + (k.y + k.h / 2 - cy) ** 2) ** 0.5
-
-    by_dist = sorted(G915X_KEYS, key=dist)
-    n_rings = 6
-    chunk = max(len(by_dist) // n_rings, 1)
-
-    for i in range(0, len(by_dist), max(chunk, 1)):
-        batch = by_dist[i:i + chunk]
-        t = min(i / max(len(by_dist) - 1, 1), 1.0)
-        color = _lerp(primary, secondary, t)
-        if t < 0.15:
-            color = _lerp((255, 255, 255), primary, t / 0.15)
-        for key in batch:
-            _sc(kb, key.address, *color)
-        time.sleep(0.08)
-
-    time.sleep(0.3)
-
-    for i in range(len(by_dist) - 1, -1, -max(chunk, 1)):
-        batch = by_dist[max(i - chunk, 0):i + 1]
-        for key in batch:
-            _sc(kb, key.address, *OFF)
-        time.sleep(0.04)
-    time.sleep(0.15)
+@register("explosion", "Pulsating burst — rings expanding from center")
+def explosion(cfg: AnimationConfig) -> FrameStream:
+    """Loopable explosion: continuous rings perpetually emanating outward."""
+    radii: dict[int, float] = {
+        a: math.hypot(_KX[a] - _CX, _KY[a] - _CY)
+        for a in _KX
+    }
+    phase = 0.0
+    while True:
+        primary, secondary = cfg.primary, cfg.secondary
+        f: Frame = {}
+        for a, r in radii.items():
+            r_norm = r / max(_MAX_RADIUS, 0.001)
+            # Multiple concentric rings traveling outward.
+            best_b = 0.0
+            for ring in range(3):
+                front = (phase - ring * 0.33) % 1.0
+                ring_dist = abs(r_norm - front)
+                if ring_dist < 0.18:
+                    b = (1.0 - ring_dist / 0.18) ** 2
+                    if b > best_b:
+                        best_b = b
+            color = _lerp(primary, secondary, r_norm)
+            if best_b > 0.5:
+                color = _lerp(color, (255, 255, 255), 0.5)
+            f[a] = _dim(color, max(0.15, best_b))
+        yield f, DT
+        phase = _step(phase, cfg.speed, 0.8)
 
 
 @register("matrix", "Digital rain — falling code drops")
-def anim_matrix(kb: G915XBackend, primary, secondary) -> None:
-    kb.set_all_keys(0, 0, 0)
-    time.sleep(0.2)
-
-    head_color = _lerp(primary, (255, 255, 255), 0.5)
-    body_color = primary
-    dim_body = _dim(primary, 0.5)
-
-    columns: dict[float, list] = {}
-    for key in G915X_KEYS:
-        col = round(key.x * 2) / 2
-        columns.setdefault(col, []).append(key)
-    for col in columns.values():
+def matrix(cfg: AnimationConfig) -> FrameStream:
+    rng = random.Random()
+    cols_by_x: dict[float, list] = {}
+    for k in G915X_KEYS:
+        col = round(k.x * 2) / 2
+        cols_by_x.setdefault(col, []).append(k)
+    for col in cols_by_x.values():
         col.sort(key=lambda k: k.y)
+    col_xs = sorted(cols_by_x)
+    drops: dict[float, float] = {}    # col_x -> head_row (float)
+    state: Frame = {a: OFF for a in ALL_KEYS}
 
-    col_keys = sorted(columns.keys())
-    drops: dict[float, int] = {}
+    while True:
+        primary, secondary = cfg.primary, cfg.secondary
+        head_color = _lerp(primary, (255, 255, 255), 0.5)
+        body_color = primary
+        dim_body = _dim(primary, 0.5)
 
-    for tick in range(50):
-        if random.random() < 0.4:
-            col_x = random.choice(col_keys)
+        # Spawn new drops occasionally.
+        if rng.random() < 0.12:
+            col_x = rng.choice(col_xs)
             if col_x not in drops:
-                drops[col_x] = 0
+                drops[col_x] = -1.0
+
+        # Decay current keys to make trails (cheap fade).
+        for a in list(state):
+            r, g, b = state[a]
+            state[a] = (max(0, r - 12), max(0, g - 12), max(0, b - 12))
 
         finished = []
-        for col_x, row_idx in drops.items():
-            col = columns[col_x]
-            # Occasional secondary drops
+        for col_x, head in drops.items():
+            col = cols_by_x[col_x]
+            ihead = int(head)
             use_secondary = hash(col_x) % 5 == 0
-            h_color = _lerp(secondary, (255, 255, 255), 0.5) if use_secondary else head_color
-            b_color = secondary if use_secondary else body_color
-            d_color = _dim(secondary, 0.5) if use_secondary else dim_body
-
-            if row_idx < len(col):
-                _sc(kb, col[row_idx].address, *h_color)
-                if row_idx > 0:
-                    _sc(kb, col[row_idx - 1].address, *b_color)
-                if row_idx > 1:
-                    _sc(kb, col[row_idx - 2].address, *d_color)
-                if row_idx > 3:
-                    _sc(kb, col[row_idx - 4].address, *OFF)
-                drops[col_x] = row_idx + 1
+            hc = _lerp(secondary, (255, 255, 255), 0.5) if use_secondary else head_color
+            bc = secondary if use_secondary else body_color
+            dc = _dim(secondary, 0.5) if use_secondary else dim_body
+            if 0 <= ihead < len(col):
+                state[col[ihead].address] = hc
+                if ihead - 1 >= 0:
+                    state[col[ihead - 1].address] = bc
+                if ihead - 2 >= 0:
+                    state[col[ihead - 2].address] = dc
+                drops[col_x] = head + 0.6 * max(0.3, cfg.speed)
             else:
-                for j in range(max(row_idx - 4, 0), len(col)):
-                    _sc(kb, col[j].address, *OFF)
                 finished.append(col_x)
-
         for col_x in finished:
             del drops[col_x]
-        time.sleep(0.06)
 
-    _set_many(kb, ALL_KEYS, *OFF)
+        yield dict(state), DT
+
+
+# =====================================================================
+# Runner — drives a stream against a callback, with cancellation
+# =====================================================================
+
+class AnimationRunner:
+    """Plays an animation in a worker thread.
+
+    * ``play(name, cfg, loop=True)`` — run forever (ambient).
+    * ``play(name, cfg, duration=N)`` — stop after N seconds (startup).
+    * Edits to ``cfg`` are picked up live by animations on their next frame.
+    * A new ``play`` cancels any in-flight animation cleanly.
+    """
+
+    # Short stop timeout: the longest dt is ~33 ms, so the worker reaches
+    # its cancel.wait poll quickly. Keeping this small avoids the GUI
+    # having to wait noticeably even on the rare cases we still restart.
+    STOP_TIMEOUT = 0.5
+
+    def __init__(self, on_frame: Callable[[Frame], None]):
+        self._on_frame = on_frame
+        self._thread: threading.Thread | None = None
+        self._cancel = threading.Event()
+        self._lock = threading.Lock()
+        self._cfg: AnimationConfig | None = None
+
+    @property
+    def cfg(self) -> AnimationConfig | None:
+        return self._cfg
+
+    def play(self, name: str, cfg: AnimationConfig,
+             *, loop: bool = False, duration: float | None = None) -> None:
+        if name not in ANIMATIONS:
+            return
+        with self._lock:
+            self._stop_locked()
+            self._cancel = threading.Event()
+            cancel = self._cancel
+            self._cfg = cfg
+            self._thread = threading.Thread(
+                target=self._run,
+                args=(name, cfg, loop, duration, cancel),
+                daemon=True,
+                name=f"animation-{name}",
+            )
+            self._thread.start()
+
+    def stop(self, *, timeout: float | None = None) -> None:
+        with self._lock:
+            self._stop_locked(timeout=timeout)
+
+    def is_running(self) -> bool:
+        t = self._thread
+        return t is not None and t.is_alive()
+
+    def update_config(self, **kwargs) -> None:
+        """Mutate the running cfg in place (live edit). No-op when idle."""
+        if self._cfg is None:
+            return
+        for k, v in kwargs.items():
+            if hasattr(self._cfg, k):
+                setattr(self._cfg, k, v)
+
+    def _stop_locked(self, *, timeout: float | None = None) -> None:
+        self._cancel.set()
+        t = self._thread
+        if t is not None and t.is_alive():
+            t.join(timeout=timeout if timeout is not None else self.STOP_TIMEOUT)
+        self._thread = None
+
+    def _run(self, name: str, cfg: AnimationConfig, loop: bool,
+             duration: float | None, cancel: threading.Event) -> None:
+        factory = ANIMATIONS[name][1]
+        started = time.monotonic()
+        while not cancel.is_set():
+            for frame, dt in factory(cfg):
+                if cancel.is_set():
+                    return
+                if duration is not None and (time.monotonic() - started) >= duration:
+                    return
+                self._on_frame(_scale_frame(frame, cfg.intensity))
+                if dt > 0 and cancel.wait(dt):
+                    return
+            if not loop:
+                return
+
+
+# =====================================================================
+# Backwards-compatible synchronous API
+# =====================================================================
+
+def play_animation(name: str, kb, profile=None, *, max_seconds: float = 5.0) -> None:
+    """Run an animation against a backend, capped on real time.
+
+    Used by the legacy ``g915x-rgb-apply`` CLI path. Caps execution so
+    one-shot uses of the now-infinite generators terminate.
+    """
+    if not name or name not in ANIMATIONS:
+        return
+
+    primary = getattr(profile, "animation_primary", (0, 128, 255)) if profile else (0, 128, 255)
+    secondary = getattr(profile, "animation_secondary", (255, 64, 128)) if profile else (255, 64, 128)
+    cfg = AnimationConfig(primary=primary, secondary=secondary)
+
+    factory = ANIMATIONS[name][1]
+    prev: Frame = {}
+    started = time.monotonic()
+    for frame, dt in factory(cfg):
+        if (time.monotonic() - started) >= max_seconds:
+            return
+        diff = {a: c for a, c in frame.items() if prev.get(a) != c}
+        if diff:
+            kb.apply_key_colors(diff)
+        prev = dict(frame)
+        if dt > 0:
+            time.sleep(dt)

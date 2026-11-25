@@ -1,72 +1,76 @@
-"""CLI tool to apply the last-used profile to the keyboard.
+"""CLI shim that asks the daemon to apply a profile.
 
-Used by the systemd service on login/resume.
-Usage: python -m g915x_rgb.apply [profile_name]
+Usage::
+
+    g915x-rgb-apply [profile_name]
+
+Kept for backwards compat with the old systemd unit / shell habits;
+real work happens in the daemon. If the daemon isn't running yet, this
+launches it via D-Bus activation (or, as a last resort, by running
+``g915x-rgb-daemon`` itself in the foreground for one-shot use).
 """
 
+from __future__ import annotations
+
+import os
+import subprocess
 import sys
 import time
 
-from .animation import play_animation
-from .backend import G915XBackend, KeyboardNotFoundError
 from .config import get_last_profile
-from .profile import Profile, create_default_profile, load_all_profiles
+from .daemon import DBUS_BUS_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE
 
 
-def apply_profile(profile: Profile, retries: int = 3) -> bool:
-    """Apply a profile to the keyboard with retry logic."""
+def _client():
+    try:
+        import dbus
+    except ImportError:
+        print("dbus-python is required (Arch: pacman -S python-dbus)",
+              file=sys.stderr)
+        sys.exit(2)
+    bus = dbus.SessionBus()
+    proxy = bus.get_object(DBUS_BUS_NAME, DBUS_OBJECT_PATH)
+    return dbus.Interface(proxy, DBUS_INTERFACE), dbus
+
+
+def _ensure_daemon_running(retries: int = 6, delay: float = 0.5) -> bool:
+    """Try to connect; if the daemon isn't there, start it and wait briefly."""
+    iface, dbus_mod = _client()
     for attempt in range(retries):
         try:
-            kb = G915XBackend()
-            kb.connect()
-            play_animation(profile.startup_animation, kb, profile=profile)
-            colors = profile.get_all_key_colors()
-            kb.set_all_keys(0, 0, 0)
-            time.sleep(0.1)
-            kb.apply_key_colors(colors)
-            kb.disconnect()
+            iface.GetStatus()
             return True
-        except KeyboardNotFoundError:
-            if attempt < retries - 1:
-                time.sleep(2)
-            continue
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            if attempt < retries - 1:
-                time.sleep(1)
-            continue
+        except dbus_mod.exceptions.DBusException:
+            if attempt == 0:
+                # Spawn the daemon in the background.
+                try:
+                    subprocess.Popen(
+                        [sys.executable, "-m", "g915x_rgb.daemon"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+                except OSError as e:
+                    print(f"could not spawn daemon: {e}", file=sys.stderr)
+                    return False
+            time.sleep(delay)
+            iface, _ = _client()
     return False
 
 
-def main():
-    # Determine which profile to apply
-    if len(sys.argv) > 1:
-        target_name = sys.argv[1]
-    else:
-        target_name = get_last_profile()
-
-    if not target_name:
-        target_name = "Default"
-
-    # Find the profile
-    profiles = load_all_profiles()
-    profile = None
-    for p in profiles:
-        if p.name.lower() == target_name.lower():
-            profile = p
-            break
-
-    if profile is None:
-        profile = create_default_profile()
-        print(f"Profile '{target_name}' not found, using default")
-
-    print(f"Applying profile: {profile.name}")
-    if apply_profile(profile):
-        print("Done!")
-    else:
-        print("Failed to apply profile (keyboard not found)", file=sys.stderr)
-        sys.exit(1)
+def main() -> int:
+    target = sys.argv[1] if len(sys.argv) > 1 else (get_last_profile() or "Default")
+    if not _ensure_daemon_running():
+        print("daemon did not start", file=sys.stderr)
+        return 1
+    iface, _ = _client()
+    ok = bool(iface.SetProfile(target, ""))
+    if ok:
+        print(f"applied profile: {target}")
+        return 0
+    print(f"failed to apply profile: {target}", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

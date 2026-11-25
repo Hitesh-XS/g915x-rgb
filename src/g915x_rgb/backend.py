@@ -20,6 +20,8 @@ HID_KEYCODE_OFFSET = 3  # Logitech address = HID keycode - 3
 FEATURE_PER_KEY_BACKLIGHT = 0x8081
 FEATURE_RGB_EFFECTS = 0x8071
 FEATURE_BRIGHTNESS = 0x8040
+FEATURE_UNIFIED_BATTERY = 0x1004
+FEATURE_BATTERY_LEGACY = 0x1000
 
 # PerKeyBacklightV2 function IDs (shifted left 4 bits for byte 3)
 FUNC_SET_KEY_COLOR = 0x10     # Function 1: set up to 4 individual keys
@@ -39,6 +41,8 @@ class G915XBackend:
         self._fd = None
         self._hidraw_path = None
         self._pkb_index = None  # PerKeyBacklight feature index
+        self._battery_index: int | None = None
+        self._battery_feature: int | None = None  # which feature ID we resolved
 
     @property
     def is_connected(self) -> bool:
@@ -71,6 +75,8 @@ class G915XBackend:
             os.close(self._fd)
             self._fd = None
             self._pkb_index = None
+            self._battery_index = None
+            self._battery_feature = None
 
     def _find_hidraw_device(self) -> str | None:
         """Find the hidraw device for interface 2 of the G915 X."""
@@ -121,8 +127,24 @@ class G915XBackend:
                 break
 
     def _send(self, data: list[int]) -> None:
-        """Send a HID++ message (no response expected)."""
-        os.write(self._fd, bytes(data))
+        """Send a HID++ message (no response expected).
+
+        Tolerates transient ``BlockingIOError`` from a saturated kernel
+        HID write queue: short backoff + one retry, then drop the
+        message. Letting the exception propagate would stall the
+        renderer's send loop and cause a visible freeze.
+        """
+        buf = bytes(data)
+        try:
+            os.write(self._fd, buf)
+        except BlockingIOError:
+            time.sleep(0.001)
+            try:
+                os.write(self._fd, buf)
+            except (BlockingIOError, OSError):
+                return
+        except OSError:
+            return
         # Quick non-blocking read to prevent buffer buildup
         try:
             r, _, _ = select.select([self._fd], [], [], 0)
@@ -261,6 +283,45 @@ class G915XBackend:
     def _ensure_connected(self) -> None:
         if self._fd is None:
             self.connect()
+
+    def get_battery(self) -> tuple[int, bool] | None:
+        """Query battery status.
+
+        Returns ``(percentage, charging)`` where ``percentage`` is 0–100
+        and ``charging`` is True when the keyboard is charging or fully
+        charged on cable. Returns ``None`` when neither battery feature is
+        available or the device fails to respond.
+        """
+        if self._fd is None:
+            return None
+
+        if self._battery_index is None:
+            for feature_id in (FEATURE_UNIFIED_BATTERY, FEATURE_BATTERY_LEGACY):
+                idx = self._get_feature_index(feature_id)
+                if idx is not None:
+                    self._battery_index = idx
+                    self._battery_feature = feature_id
+                    break
+        if self._battery_index is None:
+            return None
+
+        # Function 1 == getStatus. Encoded as (fn << 4) | swid in byte 3.
+        resp = self._send_recv(
+            [0x10, DEVICE_INDEX, self._battery_index, 0x10, 0x00, 0x00, 0x00]
+        )
+        if resp is None or len(resp) < 7 or resp[2] == 0xFF:
+            return None
+
+        if self._battery_feature == FEATURE_UNIFIED_BATTERY:
+            soc = resp[4]
+            charging_status = resp[6] if len(resp) > 6 else 0
+            # 1=charging, 2=charging slow, 3=charge complete (still on cable)
+            charging = charging_status in (1, 2, 3)
+        else:  # FEATURE_BATTERY_LEGACY
+            soc = resp[4]
+            status = resp[6] if len(resp) > 6 else 0
+            charging = status in (1, 2, 3, 8, 9)
+        return (max(0, min(100, soc)), charging)
 
     def __enter__(self):
         self.connect()
