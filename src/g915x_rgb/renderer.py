@@ -3,9 +3,8 @@
 Layers (bottom to top):
 
 1. **base**       — the static profile colors set by ``set_base``.
-2. **ambient**    — the latest frame yielded by a looping
-                    :class:`~g915x_rgb.animation.AnimationRunner`. When
-                    present it shadows ``base``.
+2. **ambient**    — a playing :class:`~g915x_rgb.animation.AnimationSource`.
+                    When present it shadows ``base``.
 3. **transition** — interpolates between a snapshot of what was visible
                     when the transition began and the current target
                     layer; supersedes both ``base`` and ``ambient`` for
@@ -26,10 +25,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-# Note: ``threading`` import above is intentionally also used by
-# play_one_shot's watcher thread.
-
-from .animation import AnimationConfig, AnimationRunner, Frame, RGB, _lerp
+from .animation import AnimationConfig, AnimationSource, Frame, RGB, _lerp
 from .transitions import TRANSITIONS, TransitionConfig
 
 logger = logging.getLogger("g915x.renderer")
@@ -38,6 +34,9 @@ logger = logging.getLogger("g915x.renderer")
 # is in [0, 1] and controls how strongly the overlay color blends over
 # the underlying layer (base or ambient). Sparse — only the affected
 # keys appear in the dict.
+# Smallest channel change worth sending while something is moving.
+MIN_CHANGE = 5
+
 ReactiveSource = Callable[[float], dict[int, tuple[RGB, float]]]
 
 
@@ -55,8 +54,9 @@ class _Transition:
 @dataclass
 class _State:
     base: Frame = field(default_factory=dict)
-    ambient_frame: Frame | None = None
-    ambient_runner: AnimationRunner | None = None
+    ambient: AnimationSource | None = None
+    ambient_ends: float | None = None
+    ambient_done: Callable[[], None] | None = None
     transition: _Transition | None = None
     reactive: ReactiveSource | None = None
 
@@ -64,7 +64,7 @@ class _State:
 class Renderer:
     """Composes layers and pushes deltas to the keyboard backend."""
 
-    def __init__(self, kb, *, fps: float = 15.0) -> None:
+    def __init__(self, kb, *, fps: float = 20.0) -> None:
         self._kb = kb
         self._period = 1.0 / fps
         self._state = _State()
@@ -73,7 +73,7 @@ class Renderer:
         self._thread: threading.Thread | None = None
         self._filter: Callable[[Frame], Frame] | None = None
         self._last_sent: Frame = {}
-        self._ambient_name = ""
+        self._moving = False
         self._failing = False
 
     # ---------- lifecycle ----------
@@ -88,14 +88,6 @@ class Renderer:
 
     def stop(self, *, timeout: float = 2.0) -> None:
         self._cancel.set()
-        # Detach the ambient runner under the lock, then stop it WITHOUT
-        # the lock held — the runner's worker thread takes our lock to
-        # deliver frames, so joining it under the lock deadlocks.
-        with self._lock:
-            runner = self._state.ambient_runner
-            self._state.ambient_runner = None
-        if runner is not None:
-            runner.stop()
         t = self._thread
         if t is not None and t.is_alive():
             t.join(timeout=timeout)
@@ -117,110 +109,41 @@ class Renderer:
             self._state.base = dict(frame)
 
     def start_ambient(self, name: str, cfg: AnimationConfig) -> None:
-        # Detach the previous runner first so we can stop it WITHOUT
-        # holding self._lock; its worker thread takes self._lock from
-        # _on_frame, and joining-under-lock would deadlock.
+        source = AnimationSource(name, cfg)
         with self._lock:
-            old = self._state.ambient_runner
-            self._state.ambient_runner = None
-            self._state.ambient_frame = None
-        if old is not None:
-            old.stop()
-
-        # Tag the new runner so late frames from a not-quite-stopped
-        # predecessor can't overwrite ambient_frame after we've moved on.
-        runner_box: list = []
-
-        def _on_frame(f: Frame) -> None:
-            with self._lock:
-                if runner_box and self._state.ambient_runner is runner_box[0]:
-                    self._state.ambient_frame = dict(f)
-
-        runner = AnimationRunner(on_frame=_on_frame)
-        runner_box.append(runner)
-        with self._lock:
-            self._state.ambient_runner = runner
-            self._ambient_name = name
-        runner.play(name, cfg, loop=True)
+            self._state.ambient = source
+            self._state.ambient_ends = None
 
     def stop_ambient(self) -> None:
         with self._lock:
-            runner = self._state.ambient_runner
-            self._state.ambient_runner = None
-            self._state.ambient_frame = None
-        if runner is not None:
-            runner.stop()
+            self._state.ambient = None
+            self._state.ambient_ends = None
 
-    def update_ambient_config(self, **kwargs) -> AnimationConfig | None:
-        """Live-update the running ambient cfg without restarting.
-
-        Returns the runner's cfg (so the caller can compare-and-decide
-        elsewhere). Returns None if no ambient is running.
-        """
+    def update_ambient_config(self, **kwargs) -> None:
+        """Change the running animation's colors or speed in place."""
         with self._lock:
-            runner = self._state.ambient_runner
-        if runner is None:
-            return None
-        runner.update_config(**kwargs)
-        return runner.cfg
+            if self._state.ambient is not None:
+                for k, v in kwargs.items():
+                    setattr(self._state.ambient.cfg, k, v)
 
     def ambient_name(self) -> str:
         """Name of the looping animation, or "" (also during a one-shot)."""
         with self._lock:
-            return self._ambient_name if self._state.ambient_runner is not None else ""
-
-    def has_ambient(self) -> bool:
-        with self._lock:
-            return self._state.ambient_runner is not None
+            looping = self._state.ambient is not None and self._state.ambient_ends is None
+            return self._state.ambient.name if looping else ""
 
     def play_one_shot(self, name: str, cfg: AnimationConfig,
                       *, duration: float = 3.0,
                       on_done: Callable[[], None] | None = None) -> None:
-        """Run a finite animation in the ambient slot, fire ``on_done`` after.
+        """Play an animation for ``duration`` seconds, then call ``on_done``.
 
-        Used for startup animations: takes over the ambient layer,
-        plays for ``duration`` seconds, then yields back to whoever set
-        the next ambient/base.
+        Nothing is called if something else replaces it first.
         """
-        # Reuse the ambient slot but with duration-capped playback.
+        source = AnimationSource(name, cfg)
         with self._lock:
-            old = self._state.ambient_runner
-            self._state.ambient_runner = None
-            self._state.ambient_frame = None
-        if old is not None:
-            old.stop()
-
-        runner_box: list = []
-
-        def _on_frame(f: Frame) -> None:
-            with self._lock:
-                if runner_box and self._state.ambient_runner is runner_box[0]:
-                    self._state.ambient_frame = dict(f)
-
-        runner = AnimationRunner(on_frame=_on_frame)
-        runner_box.append(runner)
-        with self._lock:
-            self._state.ambient_runner = runner
-            self._ambient_name = ""
-
-        # Wrap on_done so the ambient slot self-clears when the one-shot ends.
-        def _done_thread():
-            t = runner._thread
-            if t is not None:
-                t.join()
-            with self._lock:
-                if self._state.ambient_runner is runner:
-                    self._state.ambient_runner = None
-                    self._state.ambient_frame = None
-            if on_done is not None:
-                try:
-                    on_done()
-                except Exception:
-                    logger.exception("play_one_shot on_done failed")
-
-        runner.play(name, cfg, duration=duration)
-        threading.Thread(target=_done_thread, daemon=True,
-                         name="one-shot-watcher").start()
+            self._state.ambient = source
+            self._state.ambient_ends = time.monotonic() + duration
+            self._state.ambient_done = on_done
 
     def start_transition(
         self,
@@ -274,11 +197,19 @@ class Renderer:
     def _compose(self, now: float) -> Frame:
         with self._lock:
             base = dict(self._state.base)
-            amb = dict(self._state.ambient_frame) if self._state.ambient_frame else None
+            done = None
+            if self._state.ambient_ends is not None and now >= self._state.ambient_ends:
+                done = self._state.ambient_done
+                self._state.ambient = self._state.ambient_ends = None
+                self._state.ambient_done = None
+            source = self._state.ambient
             tx = self._state.transition
             reactive = self._state.reactive
 
-        target = amb if amb is not None else base
+        if done is not None:
+            done()
+        self._moving = source is not None or tx is not None
+        target = source.frame(now) if source is not None else base
 
         if tx is not None:
             t = (now - tx.started_at) / tx.duration
@@ -305,6 +236,7 @@ class Renderer:
                 logger.exception("reactive source raised")
                 overlay = {}
             if overlay:
+                self._moving = True
                 merged = dict(content)
                 for addr, (color, alpha) in overlay.items():
                     if alpha <= 0:
@@ -322,7 +254,13 @@ class Renderer:
     def _diff_send(self, frame: Frame) -> None:
         with self._lock:
             last = self._last_sent
-        diff = {a: c for a, c in frame.items() if last.get(a) != c}
+        if self._moving:
+            # Invisible changes would cost frame rate. The comparison is with
+            # what was sent, so small steps add up and are sent eventually.
+            diff = {a: c for a, c in frame.items()
+                    if a not in last or (c != last[a] and not any(c)) or max(abs(x - y) for x, y in zip(c, last[a])) >= MIN_CHANGE}
+        else:
+            diff = {a: c for a, c in frame.items() if last.get(a) != c}
         if not diff:
             self._failing = False
             return

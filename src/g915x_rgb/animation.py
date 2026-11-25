@@ -6,12 +6,9 @@ Every animation is a generator yielding ``(frame, dt)`` at a uniform
 * ambient mode loops cleanly without hard resets,
 * mid-flight cfg edits (color sliders, speed, intensity) take effect on
   the very next frame because the loop bodies re-read ``cfg`` per frame,
-* the runner can play any animation as a one-shot by capping it on
-  elapsed seconds.
+* any animation can be played once by limiting how long it runs.
 
-The :class:`AnimationRunner` consumes a stream against an ``on_frame``
-callback. ``play(..., loop=True)`` keeps it running forever (ambient);
-``play(..., duration=N)`` stops automatically after N seconds (startup).
+:class:`AnimationSource` turns a stream into frames for any moment in time.
 """
 
 from __future__ import annotations
@@ -19,8 +16,6 @@ from __future__ import annotations
 import colorsys
 import math
 import random
-import threading
-import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 
@@ -38,8 +33,7 @@ class AnimationConfig:
     """Tunable parameters threaded through every animation.
 
     The dataclass is **mutable**: animations re-read these fields each
-    frame, so updates from the GUI take effect without restarting the
-    runner.
+    frame, so updates from the GUI take effect without restarting.
     """
 
     primary: RGB = (0x00, 0x80, 0xFF)
@@ -72,10 +66,7 @@ def get_animation_choices() -> list[tuple[str, str]]:
 
 ALL_KEYS: list[int] = [k.address for k in G915X_KEYS]
 OFF: RGB = (0, 0, 0)
-# 15 FPS: the device firmware can't keep up with all-keys-changed frames
-# at 30 FPS — its HID write buffer saturates after a few seconds and
-# everything stalls. 15 FPS is the upper bound the original code happened
-# to land on for full-keyboard animations like aurora/helix/ripple.
+# Time between generated frames; playback blends between them.
 DT = 1.0 / 15.0
 
 
@@ -503,9 +494,9 @@ def matrix(cfg: AnimationConfig) -> FrameStream:
         dim_body = _dim(primary, 0.5)
 
         # Spawn new drops occasionally.
-        if rng.random() < 0.12:
+        for _ in range(2):
             col_x = rng.choice(col_xs)
-            if col_x not in drops:
+            if col_x not in drops and rng.random() < 0.5:
                 drops[col_x] = -1.0
 
         # Decay current keys to make trails (cheap fade).
@@ -607,86 +598,37 @@ def rainbow(cfg: AnimationConfig) -> FrameStream:
 
 
 # =====================================================================
-# Runner — drives a stream against a callback, with cancellation
+# Playback
 # =====================================================================
 
-class AnimationRunner:
-    """Plays an animation in a worker thread.
+class AnimationSource:
+    """Plays an animation in real time, at whatever rate it is asked for.
 
-    * ``play(name, cfg, loop=True)`` — run forever (ambient).
-    * ``play(name, cfg, duration=N)`` — stop after N seconds (startup).
-    * Edits to ``cfg`` are picked up live by animations on their next frame.
-    * A new ``play`` cancels any in-flight animation cleanly.
+    Frames are produced every ``DT`` and blended in between, so motion keeps
+    its speed and stays even when the keyboard cannot take every frame.
     """
 
-    # Short stop timeout: the longest dt is ~33 ms, so the worker reaches
-    # its cancel.wait poll quickly. Keeping this small avoids the GUI
-    # having to wait noticeably even on the rare cases we still restart.
-    STOP_TIMEOUT = 0.5
+    MAX_CATCH_UP = 8
 
-    def __init__(self, on_frame: Callable[[Frame], None]):
-        self._on_frame = on_frame
-        self._thread: threading.Thread | None = None
-        self._cancel = threading.Event()
-        self._lock = threading.Lock()
-        self._cfg: AnimationConfig | None = None
+    def __init__(self, name: str, cfg: AnimationConfig) -> None:
+        self.name = name
+        self.cfg = cfg
+        self._stream = ANIMATIONS[name][1](cfg)
+        self._a = next(self._stream)[0]
+        self._b = next(self._stream)[0]
+        self._at: float | None = None       # time of frame ``_a``
 
-    @property
-    def cfg(self) -> AnimationConfig | None:
-        return self._cfg
-
-    def play(self, name: str, cfg: AnimationConfig,
-             *, loop: bool = False, duration: float | None = None) -> None:
-        if name not in ANIMATIONS:
-            return
-        with self._lock:
-            self._stop_locked()
-            self._cancel = threading.Event()
-            cancel = self._cancel
-            self._cfg = cfg
-            self._thread = threading.Thread(
-                target=self._run,
-                args=(name, cfg, loop, duration, cancel),
-                daemon=True,
-                name=f"animation-{name}",
-            )
-            self._thread.start()
-
-    def stop(self, *, timeout: float | None = None) -> None:
-        with self._lock:
-            self._stop_locked(timeout=timeout)
-
-    def is_running(self) -> bool:
-        t = self._thread
-        return t is not None and t.is_alive()
-
-    def update_config(self, **kwargs) -> None:
-        """Mutate the running cfg in place (live edit). No-op when idle."""
-        if self._cfg is None:
-            return
-        for k, v in kwargs.items():
-            if hasattr(self._cfg, k):
-                setattr(self._cfg, k, v)
-
-    def _stop_locked(self, *, timeout: float | None = None) -> None:
-        self._cancel.set()
-        t = self._thread
-        if t is not None and t.is_alive():
-            t.join(timeout=timeout if timeout is not None else self.STOP_TIMEOUT)
-        self._thread = None
-
-    def _run(self, name: str, cfg: AnimationConfig, loop: bool,
-             duration: float | None, cancel: threading.Event) -> None:
-        factory = ANIMATIONS[name][1]
-        started = time.monotonic()
-        while not cancel.is_set():
-            for frame, dt in factory(cfg):
-                if cancel.is_set():
-                    return
-                if duration is not None and (time.monotonic() - started) >= duration:
-                    return
-                self._on_frame(_scale_frame(frame, cfg.intensity))
-                if dt > 0 and cancel.wait(dt):
-                    return
-            if not loop:
-                return
+    def frame(self, now: float) -> Frame:
+        if self._at is None:
+            self._at = now
+        steps = int((now - self._at) / DT)
+        if steps > self.MAX_CATCH_UP:       # after a pause, carry on from here
+            self._at = now
+            steps = 0
+        for _ in range(steps):
+            self._a, self._b = self._b, next(self._stream)[0]
+            self._at += DT
+        t = (now - self._at) / DT
+        k = self.cfg.intensity
+        a, b = self._a, self._b
+        return {key: _dim(_lerp(c, b[key], t), k) for key, c in a.items()}

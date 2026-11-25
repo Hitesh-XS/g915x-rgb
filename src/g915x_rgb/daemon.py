@@ -1,7 +1,7 @@
 """Background service that owns the keyboard.
 
-Everything here runs on the GLib main thread except the renderer, the
-animation workers and the key reader. Callbacks from those threads are
+Everything here runs on the GLib main thread except the renderer
+and the key reader. Callbacks from those threads are
 passed back through ``GLib.idle_add``.
 
 D-Bus: ``org.g915xrgb.Controller`` at ``/org/g915xrgb/Controller``. Structured
@@ -79,7 +79,7 @@ class Controller:
     def __init__(self, kb=None, defer=GLib.idle_add) -> None:
         self._kb = kb if kb is not None else G915XBackend()
         self._defer = defer
-        self._renderer = Renderer(self._kb, fps=15.0)
+        self._renderer = Renderer(self._kb)
         self._renderer.set_filter(self._post_process)
         self.status = Status()
         self.options = get_options()

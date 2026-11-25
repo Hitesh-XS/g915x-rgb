@@ -18,6 +18,7 @@ PRODUCT_ID = 0xC359
 DEVICE_INDEX = 0x01  # Keyboard behind Lightspeed receiver
 SOFTWARE_ID = 0x0A    # Tags our requests so replies can be matched
 WRITE_TIMEOUT = 0.1
+REPLY_TIMEOUT = 0.25
 HID_KEYCODE_OFFSET = 3  # Logitech address = HID keycode - 3
 
 # Feature IDs discovered via enumeration
@@ -29,7 +30,7 @@ FEATURE_BATTERY_LEGACY = 0x1000
 
 # PerKeyBacklightV2 function IDs (shifted left 4 bits for byte 3)
 FUNC_SET_KEY_COLOR = 0x10     # Function 1: set up to 4 individual keys
-FUNC_SET_RANGE = 0x50         # Function 5: set key range to color
+FUNC_SET_CONSECUTIVE = 0x20   # Function 2: set 5 neighboring addresses
 FUNC_SET_BATCH = 0x60         # Function 6: set up to 13 keys to same color
 FUNC_COMMIT = 0x70            # Function 7: commit/apply changes
 
@@ -44,6 +45,43 @@ def device_present() -> bool:
         except OSError:
             continue
     return False
+
+
+def plan_frame(colors: dict[int, tuple[int, int, int]]) -> list[tuple[int, list[int]]]:
+    """Split a frame into as few color messages as possible.
+
+    Every message takes about 3 ms, so their number sets the frame rate.
+    """
+    messages: list[tuple[int, list[int]]] = []
+    rest = dict(colors)
+
+    by_color: dict[tuple[int, int, int], list[int]] = {}
+    for address in sorted(colors):
+        by_color.setdefault(colors[address], []).append(address)
+    for color, addresses in by_color.items():
+        # Up to 13 keys of one color; worth it from 5 keys on.
+        while len(addresses) >= 5:
+            chunk, addresses = addresses[:13], addresses[13:]
+            # Unused slots repeat a key: zero is itself an address.
+            chunk_full = chunk + [chunk[-1]] * (13 - len(chunk))
+            messages.append((FUNC_SET_BATCH, [*color, *chunk_full]))
+            for a in chunk:
+                del rest[a]
+
+    for address in sorted(rest):
+        run = range(address, address + 5)
+        if all(a in rest for a in run):
+            messages.append((FUNC_SET_CONSECUTIVE,
+                             [address, *(v for a in run for v in rest[a])]))
+            for a in run:
+                del rest[a]
+
+    left = list(rest.items())
+    for i in range(0, len(left), 4):
+        chunk4 = left[i:i + 4]
+        chunk4 += [chunk4[-1]] * (4 - len(chunk4))
+        messages.append((FUNC_SET_KEY_COLOR, [v for a, c in chunk4 for v in (a, *c)]))
+    return messages
 
 
 class KeyboardNotFoundError(Exception):
@@ -174,20 +212,31 @@ class G915XBackend:
                 return
 
     def _send(self, data: list[int]) -> None:
-        """Send a message whose reply is not needed."""
-        with self._lock:
-            self._write(data)
-            self._drain()
+        """Send a color message and wait until the keyboard has handled it.
+
+        Unpaced writes overrun the keyboard: it then stalls the USB transfer
+        and lighting freezes. Waiting adds no time, since the reply arrives
+        before the next write could start.
+        """
+        for _ in range(2):
+            if self._exchange(data, REPLY_TIMEOUT) is not None:
+                return
+        raise OSError(errno.ETIMEDOUT, "the keyboard did not reply")
 
     def _send_recv(self, data: list[int], timeout: float = 0.5) -> bytes | None:
-        """Send a request and return the reply that belongs to it.
+        """Send a request; its reply, or None on no reply or a refusal."""
+        resp = self._exchange(data, timeout)
+        return None if resp is None or resp[2] in (0x8F, 0xFF) else resp
+
+    def _exchange(self, data: list[int], timeout: float) -> bytes | None:
+        """Send a message and return its own reply, which may be an error.
 
         Replies are matched on device, feature index and function, so
-        notifications and acknowledgements of color writes are skipped.
+        notifications and late replies are skipped.
         """
         with self._lock:
             if self._fd is None:
-                return None
+                raise OSError(errno.ENODEV, "keyboard is not connected")
             self._drain()
             self._write(data)
             deadline = time.monotonic() + timeout
@@ -204,7 +253,7 @@ class G915XBackend:
                 if resp[2] == data[2] and resp[3] == data[3]:
                     return resp
                 if resp[2] in (0x8F, 0xFF) and resp[3] == data[2] and resp[4] == data[3]:
-                    return None
+                    return resp
         return None
 
     def _get_feature_index(self, feature_id: int) -> int | None:
@@ -213,107 +262,28 @@ class G915XBackend:
                                 feature_id >> 8, feature_id & 0xFF, 0x00])
         return (resp[4] or None) if resp else None
 
+    def apply_key_colors(self, key_colors: dict[int, tuple[int, int, int]]) -> None:
+        """Show ``{address: (r, g, b)}`` as one frame."""
+        self._ensure_connected()
+        if not key_colors:
+            return
+        for function, payload in plan_frame(key_colors):
+            self._send_color(function, payload)
+        self._send_color(FUNC_COMMIT, [])
+
+    def _send_color(self, function: int, payload: list[int]) -> None:
+        msg = [0x11, DEVICE_INDEX, self._pkb_index, function | SOFTWARE_ID, *payload]
+        self._send(msg + [0] * (20 - len(msg)))
+
     def set_key_color(self, address: int, r: int, g: int, b: int) -> None:
-        """Set a single key color (does not commit)."""
+        """Set one key (does not commit)."""
         self._ensure_connected()
-        msg = [0x11, DEVICE_INDEX, self._pkb_index, FUNC_SET_KEY_COLOR,
-               address, r, g, b] + [0] * 12
-        self._send(msg)
-
-    def set_keys_color(self, keys: list[tuple[int, int, int, int]]) -> None:
-        """Set multiple key colors. Each entry is (address, r, g, b).
-        Sends in batches of 4 per message (function 1 limit).
-        Does not commit.
-        """
-        self._ensure_connected()
-        for i in range(0, len(keys), 4):
-            batch = keys[i:i + 4]
-            msg = [0x11, DEVICE_INDEX, self._pkb_index, FUNC_SET_KEY_COLOR]
-            for addr, r, g, b in batch:
-                msg.extend([addr, r, g, b])
-            msg.extend([0] * (20 - len(msg)))
-            self._send(msg)
-
-    def set_range_color(self, start: int, end: int, r: int, g: int, b: int) -> None:
-        """Set a range of key addresses to the same color (does not commit)."""
-        self._ensure_connected()
-        msg = [0x11, DEVICE_INDEX, self._pkb_index, FUNC_SET_RANGE,
-               start, end, r, g, b] + [0] * 11
-        self._send(msg)
-
-    def set_batch_color(self, addresses: list[int], r: int, g: int, b: int) -> None:
-        """Set multiple keys to the same color. Up to 13 per message.
-        Does not commit.
-        """
-        self._ensure_connected()
-        for i in range(0, len(addresses), 13):
-            batch = addresses[i:i + 13]
-            msg = [0x11, DEVICE_INDEX, self._pkb_index, FUNC_SET_BATCH,
-                   r, g, b] + batch
-            msg.extend([0] * (20 - len(msg)))
-            self._send(msg)
+        self._send_color(FUNC_SET_KEY_COLOR, [address, r, g, b] * 4)
 
     def commit(self) -> None:
-        """Commit pending color changes to the keyboard."""
+        """Show everything set since the last commit."""
         self._ensure_connected()
-        msg = [0x11, DEVICE_INDEX, self._pkb_index, FUNC_COMMIT] + [0] * 16
-        self._send(msg)
-
-    # Addresses that don't respond to the range function and need
-    # individual set commands. Discovered via protocol testing.
-    SPECIAL_ADDRESSES = (
-        # Modifier keys (0x63-0x6F range)
-        list(range(0x63, 0x70))
-        # G-keys (0xB4-0xBC)
-        + list(range(0xB4, 0xBD))
-        # Media keys (0x94-0x9F)
-        + list(range(0x94, 0xA0))
-        # Logo and other special LEDs (logo at 0xD2)
-        + list(range(0xD0, 0xD8))
-    )
-
-    def set_all_keys(self, r: int, g: int, b: int) -> None:
-        """Set all keys to a single color and commit."""
-        self._ensure_connected()
-        from .keyboard_layout import G915X_KEYS
-
-        special = set(self.SPECIAL_ADDRESSES)
-
-        # Standard keys via batch
-        standard = [(k.address, r, g, b) for k in G915X_KEYS if k.address not in special]
-        for i in range(0, len(standard), 16):
-            batch = standard[i:i + 16]
-            self.set_keys_color(batch)
-            self.commit()
-
-        # Special keys: individual commits
-        for key in G915X_KEYS:
-            if key.address in special:
-                self.set_key_color(key.address, r, g, b)
-                self.commit()
-
-    def apply_key_colors(self, key_colors: dict[int, tuple[int, int, int]]) -> None:
-        """Apply a dict of {address: (r, g, b)} efficiently.
-
-        Standard keys are batched (4 per message, commit every 16).
-        Special keys (modifiers, G-keys, media, logo) need individual
-        commits to work reliably on the G915 X.
-        """
-        special = set(self.SPECIAL_ADDRESSES)
-
-        standard_keys = [(a, *rgb) for a, rgb in key_colors.items() if a not in special]
-        special_keys = [(a, *rgb) for a, rgb in key_colors.items() if a in special]
-
-        # Standard keys: batch 4 per message, commit every 16
-        for i in range(0, len(standard_keys), 16):
-            batch = standard_keys[i:i + 16]
-            self.set_keys_color(batch)
-            self.commit()
-
-        # Special keys: individual commits required
-        for addr, r, g, b in special_keys:
-            self.set_key_color(addr, r, g, b)
-            self.commit()
+        self._send_color(FUNC_COMMIT, [])
 
     def _ensure_connected(self) -> None:
         if self._fd is None:

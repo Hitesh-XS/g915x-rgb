@@ -1,176 +1,139 @@
-"""HID++ protocol layer regression tests.
-
-Drives :class:`G915XBackend` against an in-memory fake hidraw fd so we
-can assert on the exact bytes that would hit the kernel. Catches the
-two things most likely to silently break: the standard/special key
-split inside ``apply_key_colors`` and the message framing for the
-batch / range / single-key functions.
-"""
+"""HID++ messages, driven against a fake keyboard."""
 
 from __future__ import annotations
 
 import errno
+import random
 
 import pytest
 
+import g915x_rgb.backend as backend
 from g915x_rgb.backend import (
     DEVICE_INDEX,
     FUNC_COMMIT,
     FUNC_SET_BATCH,
+    FUNC_SET_CONSECUTIVE,
     FUNC_SET_KEY_COLOR,
-    FUNC_SET_RANGE,
     G915XBackend,
+    plan_frame,
 )
+from g915x_rgb.keyboard_layout import ALL_ADDRESSES
 
 
-_patches: list[pytest.MonkeyPatch] = []
+class Wire:
+    """Answers each write the way the keyboard does."""
 
+    def __init__(self):
+        self.writes, self.inbox, self.silent = [], [], 0
 
-@pytest.fixture(autouse=True)
-def _undo_patches():
-    yield
-    while _patches:
-        _patches.pop().undo()
-
-
-class _FakeFd:
-    """A drop-in for an os.write/os.read target: collects everything written."""
-
-    def __init__(self) -> None:
-        self.writes: list[bytes] = []
-
-    def write_all(self, data: bytes) -> None:
+    def write(self, _fd, data):
         self.writes.append(bytes(data))
-
-
-def _backend(fd_value: int = 999) -> tuple[G915XBackend, _FakeFd]:
-    kb = G915XBackend()
-    kb._fd = fd_value
-    kb._pkb_index = 0x07
-    fake = _FakeFd()
-
-    def fake_write(_fd, data):
-        fake.write_all(data)
+        if self.silent:
+            self.silent -= 1
+        else:
+            self.inbox.append(bytes(data[:4]) + bytes(16))
         return len(data)
 
-    def fake_select(*_a, **_kw):
-        return ([], [], [])
+    def read(self, *_a):
+        if not self.inbox:
+            raise BlockingIOError
+        return self.inbox.pop(0)
 
-    def fake_read(*_a, **_kw):
-        raise BlockingIOError
-
-    mp = pytest.MonkeyPatch()
-    _patches.append(mp)
-    mp.setattr("g915x_rgb.backend.os.write", fake_write)
-    mp.setattr("g915x_rgb.backend.select.select", fake_select)
-    mp.setattr("g915x_rgb.backend.os.read", fake_read)
-    return kb, fake
+    def select(self, *_a):
+        return ([1] if self.inbox else [], [], [])
 
 
-def test_set_key_color_emits_long_message_with_function_byte():
-    kb, fake = _backend()
-    kb.set_key_color(0x40, 1, 2, 3)
-    assert len(fake.writes) == 1
-    msg = fake.writes[0]
-    assert msg[0] == 0x11
-    assert msg[1] == DEVICE_INDEX
-    assert msg[2] == kb._pkb_index
-    assert msg[3] == FUNC_SET_KEY_COLOR
-    assert msg[4:8] == bytes([0x40, 1, 2, 3])
-    assert len(msg) == 20
+@pytest.fixture
+def kb(monkeypatch):
+    wire = Wire()
+    monkeypatch.setattr(backend.os, "write", wire.write)
+    monkeypatch.setattr(backend.os, "read", wire.read)
+    monkeypatch.setattr(backend.select, "select", wire.select)
+    b = G915XBackend()
+    b._fd, b._pkb_index = 999, 7
+    return b, wire
 
 
-def test_set_keys_color_batches_four_per_message():
-    kb, fake = _backend()
-    keys = [(i, 10, 20, 30) for i in range(0x40, 0x4A)]   # 10 keys
-    kb.set_keys_color(keys)
-    assert len(fake.writes) == 3   # 4 + 4 + 2
-    assert fake.writes[0][3] == FUNC_SET_KEY_COLOR
-    # First batch encodes 4 keys after the header.
-    assert fake.writes[0][4:8] == bytes([0x40, 10, 20, 30])
-    assert fake.writes[0][8:12] == bytes([0x41, 10, 20, 30])
+def decode(messages):
+    out = {}
+    for fn, p in messages:
+        if fn == FUNC_SET_KEY_COLOR:
+            out.update({p[i]: tuple(p[i + 1:i + 4]) for i in range(0, 16, 4)})
+        elif fn == FUNC_SET_CONSECUTIVE:
+            out.update({p[0] + i: tuple(p[1 + 3 * i:4 + 3 * i]) for i in range(5)})
+        elif fn == FUNC_SET_BATCH:
+            out.update({a: tuple(p[:3]) for a in p[3:]})
+    return out
 
 
-def test_set_range_color_packs_one_message():
-    kb, fake = _backend()
-    kb.set_range_color(0x10, 0x20, 1, 2, 3)
-    assert len(fake.writes) == 1
-    msg = fake.writes[0]
-    assert msg[3] == FUNC_SET_RANGE
-    assert msg[4:9] == bytes([0x10, 0x20, 1, 2, 3])
+@pytest.mark.parametrize("colors", [1, 2, 8, 40, 10**6])
+def test_plan_sets_exactly_the_requested_keys(colors):
+    rng = random.Random(colors)
+    for _ in range(60):
+        keys = rng.sample(ALL_ADDRESSES, rng.randint(1, len(ALL_ADDRESSES)))
+        frame = {a: ((n := rng.randrange(colors)) % 256, n // 256 % 256, n // 65536) for a in keys}
+        plan = plan_frame(frame)
+        assert decode(plan) == frame
+        assert all(len(p) == 16 for _, p in plan)
 
 
-def test_set_batch_color_packs_thirteen_per_message():
-    kb, fake = _backend()
-    addrs = list(range(0x40, 0x55))   # 21 keys
-    kb.set_batch_color(addrs, 5, 5, 5)
-    # 13 + 8
-    assert len(fake.writes) == 2
-    msg = fake.writes[0]
-    assert msg[3] == FUNC_SET_BATCH
-    assert msg[4:7] == bytes([5, 5, 5])
-    assert list(msg[7:20]) == list(range(0x40, 0x4D))
+def test_plan_is_compact():
+    assert len(plan_frame(dict.fromkeys(ALL_ADDRESSES, (1, 2, 3)))) <= 10
+    assert len(plan_frame({a: (a, 0, 0) for a in ALL_ADDRESSES})) <= 28
 
 
-def test_apply_key_colors_splits_standard_and_special():
-    kb, fake = _backend()
-    # 4 standard keys + 2 special (one modifier, one G-key)
-    colors = {
-        0x10: (10, 20, 30),
-        0x11: (10, 20, 30),
-        0x12: (10, 20, 30),
-        0x13: (10, 20, 30),
-        0x69: (1, 1, 1),    # LShift
-        0xB4: (2, 2, 2),    # G1
-    }
-    kb.apply_key_colors(colors)
-    funcs = [m[3] for m in fake.writes]
-    # Standard batch -> SET_KEY_COLOR + COMMIT, then per-special: SET_KEY_COLOR + COMMIT (×2)
-    assert funcs[0] == FUNC_SET_KEY_COLOR
-    assert funcs[1] == FUNC_COMMIT
-    # Special keys each emit their own pair
-    assert funcs.count(FUNC_COMMIT) == 3
-    assert any(m[4] == 0x69 for m in fake.writes)
-    assert any(m[4] == 0xB4 for m in fake.writes)
+def test_a_frame_is_committed_once_and_last(kb):
+    b, wire = kb
+    b.apply_key_colors({a: (a, 0, 0) for a in ALL_ADDRESSES})
+    functions = [m[3] & 0xF0 for m in wire.writes]
+    assert functions.count(FUNC_COMMIT) == 1 and functions[-1] == FUNC_COMMIT
+    assert all(len(m) == 20 and m[:3] == bytes([0x11, DEVICE_INDEX, 7]) for m in wire.writes)
 
 
-def test_write_errors_are_reported():
-    kb, _ = _backend()
+def test_every_write_waits_for_its_reply(kb):
+    b, wire = kb
+    original = wire.write
 
+    def write(fd, data):
+        assert not wire.inbox
+        return original(fd, data)
+
+    backend.os.write = write
+    b.apply_key_colors({a: (a, 0, 0) for a in ALL_ADDRESSES})
+
+
+def test_lost_reply_is_retried_then_reported(kb):
+    b, wire = kb
+    wire.silent = 1
+    b.commit()
+    assert len(wire.writes) == 2
+    wire.silent = 2
+    with pytest.raises(OSError):
+        b.commit()
+
+
+def test_write_errors_are_reported(kb, monkeypatch):
     def gone(*_a):
         raise OSError(errno.ENODEV, "gone")
 
-    _patches[-1].setattr("g915x_rgb.backend.os.write", gone)
+    monkeypatch.setattr(backend.os, "write", gone)
     with pytest.raises(OSError):
-        kb.commit()
+        kb[0].commit()
 
 
-def test_full_queue_is_retried():
-    kb, fake = _backend()
-    tries = []
+def test_unrelated_packets_are_skipped(kb, monkeypatch):
+    b, wire = kb
 
-    def busy(_fd, data):
-        tries.append(1)
-        if len(tries) < 3:
-            raise BlockingIOError
-        fake.write_all(data)
+    def write(_fd, _data):
+        wire.inbox += [bytes([0x11, DEVICE_INDEX, 7, 0x70] + [0] * 16),
+                       bytes([0x10, DEVICE_INDEX, 5, 0x1A, 77, 0, 0])]
 
-    _patches[-1].setattr("g915x_rgb.backend.os.write", busy)
-    kb.commit()
-    assert len(fake.writes) == 1
+    monkeypatch.setattr(backend.os, "write", write)
+    assert b._send_recv([0x10, DEVICE_INDEX, 5, 0x1A, 0, 0, 0])[4] == 77
 
 
-def test_reply_matching_skips_unrelated_packets():
-    kb, _ = _backend()
-    request = [0x10, DEVICE_INDEX, 0x05, 0x1A, 0, 0, 0]
-    packets = [bytes([0x11, DEVICE_INDEX, 0x07, 0x70] + [0] * 16),
-               bytes([0x10, DEVICE_INDEX, 0x05, 0x1A, 77, 0, 0])]
-    polls = []
-
-    def select_(*_a):
-        polls.append(1)
-        return ([1], [], []) if len(polls) > 1 else ([], [], [])
-
-    _patches[-1].setattr("g915x_rgb.backend.select.select", select_)
-    _patches[-1].setattr("g915x_rgb.backend.os.read", lambda *_a: packets.pop(0))
-    assert kb._send_recv(request)[4] == 77
+def test_refusal_is_not_a_value(kb, monkeypatch):
+    b, wire = kb
+    monkeypatch.setattr(backend.os, "write", lambda *_a: wire.inbox.append(
+        bytes([0x11, DEVICE_INDEX, 0xFF, 5, 0x1A, 2, 0])))
+    assert b._send_recv([0x10, DEVICE_INDEX, 5, 0x1A, 0, 0, 0]) is None

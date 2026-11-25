@@ -157,17 +157,35 @@ def test_transition_ends_on_the_new_profile(ctl):
     assert all_lit(kb, (0, 0, 255))
 
 
-def test_stale_animation_does_not_return(home):
-    late = []
-    c = daemon.Controller(FakeKeyboard(), defer=late.append)
+def test_replaced_startup_effect_does_not_return(ctl):
+    c, kb = ctl
     animated = solid("a", (1, 1, 1))
     animated.ambient.name = animated.startup.name = "plasma"
     c._show(animated, startup=True)
     c._show(solid("b", (2, 2, 2)))
-    assert wait(lambda: late)
-    for fn in late:
-        fn()
+    assert all_lit(kb, (2, 2, 2))
     assert c._renderer.ambient_name() == ""
+
+
+def test_startup_effect_gives_way_to_the_background(ctl, monkeypatch):
+    c, _ = ctl
+    monkeypatch.setattr(daemon, "STARTUP_SECONDS", 0.2)
+    p = solid("a", (1, 1, 1))
+    p.startup.name, p.ambient.name = "plasma", "fire"
+    c._show(p, startup=True)
+    assert wait(lambda: c._renderer.ambient_name() == "fire")
+
+
+def test_tiny_changes_are_skipped_only_while_moving():
+    kb = FakeKeyboard()
+    r = Renderer(kb)
+    r._diff_send({1: (100, 0, 0), 2: (3, 0, 0)})
+    r._moving = True
+    r._diff_send({1: (102, 0, 0), 2: (0, 0, 0)})
+    assert kb.lit == {1: (100, 0, 0), 2: (0, 0, 0)}
+    r._moving = False
+    r._diff_send({1: (102, 0, 0), 2: (0, 0, 0)})
+    assert kb.lit[1] == (102, 0, 0)
 
 
 def test_lock_turns_off_and_unlock_restores(ctl):
