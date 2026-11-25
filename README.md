@@ -10,7 +10,7 @@ No existing Linux tool (OpenRGB, g810-led, libratbag) supports the G915 X. This 
 - 18 background effects, also usable once at login
 - Optional typing effects: Glow, Ripple, Starburst and Heat
 - Profiles that switch with the active application (KDE Plasma)
-- Turns off when the screen locks; can dim when idle and warn on low battery
+- Turns off when the screen locks; can dim when idle
 - A Kirigami interface that follows your Plasma theme
 
 ## Installing (Arch Linux)
@@ -61,7 +61,7 @@ The G915 X communicates via Logitech's HID++ 4.2 protocol over a USB HID interfa
 4. Handles the G915 X's quirks:
    - Standard keys use HID keycode - 3 addressing
    - Modifier keys, G-keys, media keys, and logo use Logitech-specific addresses
-   - Special keys require individual commit commands (cannot be batched)
+   - Each message waits for its reply, and a frame is committed once; unpaced writes stall the keyboard
 
 ### Key Address Map
 
