@@ -45,7 +45,7 @@ MAIN_X = 1.25       # Main keyboard area start X (after G-keys + small gap)
 NAV_X = MAIN_X + 15.5   # Nav cluster (0.5u gap after main 15u)
 NUM_X = NAV_X + 3.5     # Numpad (0.5u gap after nav 3u)
 
-ROW_TOP = -0.5      # Top row Y (logo, G6-G9, backlight — above function row)
+ROW_TOP = -0.85     # Top row Y (logo, G6-G9, backlight — above function row)
 ROW_F = 0.0         # Function row Y
 ROW_1 = 1.5         # Number row Y (1.5u gap = visual separation)
 ROW_2 = 2.5
@@ -62,10 +62,10 @@ G915X_KEYS: list[KeyDef] = [
     KeyDef("G4", 0xB7, G_COL, ROW_4, w=G_W, group="gkeys"),
     KeyDef("G5", 0xB8, G_COL, ROW_5, w=G_W, group="gkeys"),
     # G6-G9: horizontal row above F1-F4
-    KeyDef("G6", 0xB9, MAIN_X + 2.0, ROW_TOP, w=0.8, h=0.4, group="gkeys"),
-    KeyDef("G7", 0xBA, MAIN_X + 3.0, ROW_TOP, w=0.8, h=0.4, group="gkeys"),
-    KeyDef("G8", 0xBB, MAIN_X + 4.0, ROW_TOP, w=0.8, h=0.4, group="gkeys"),
-    KeyDef("G9", 0xBC, MAIN_X + 5.0, ROW_TOP, w=0.8, h=0.4, group="gkeys"),
+    KeyDef("G6", 0xB9, MAIN_X + 2.15, ROW_TOP, w=0.7, h=0.7, group="gkeys"),
+    KeyDef("G7", 0xBA, MAIN_X + 3.15, ROW_TOP, w=0.7, h=0.7, group="gkeys"),
+    KeyDef("G8", 0xBB, MAIN_X + 4.15, ROW_TOP, w=0.7, h=0.7, group="gkeys"),
+    KeyDef("G9", 0xBC, MAIN_X + 5.15, ROW_TOP, w=0.7, h=0.7, group="gkeys"),
 
     # === Function row ===
     KeyDef("Esc",  _hid(0x29), MAIN_X, ROW_F, group="functions"),
@@ -87,7 +87,7 @@ G915X_KEYS: list[KeyDef] = [
 
     KeyDef("PrtSc", _hid(0x46), NAV_X, ROW_F, group="functions", label="Prt"),
     KeyDef("ScrLk", _hid(0x47), NAV_X + 1.0, ROW_F, group="functions", label="Scr"),
-    KeyDef("Pause", _hid(0x48), NAV_X + 2.0, ROW_F, group="functions", label="Pse"),
+    KeyDef("Pause", _hid(0x48), NAV_X + 2.0, ROW_F, group="functions", label="P/B"),
 
     # Media keys (top-right, above numpad)
     KeyDef("Prev",  0x9E, NUM_X, ROW_F, group="multimedia", label="<<"),
@@ -96,10 +96,10 @@ G915X_KEYS: list[KeyDef] = [
     KeyDef("Mute",  0x9C, NUM_X + 3.0, ROW_F, group="multimedia", label="Mute"),
 
     # Logo LED (top-left, above G1)
-    KeyDef("Logo",  0xD2, G_COL, ROW_TOP - 0.1, w=1.0, h=0.5, group="logo"),
+    KeyDef("Logo",  0xD2, G_COL, ROW_TOP + 0.1, w=1.0, h=0.5, group="logo"),
 
     # Backlight key (above F6)
-    KeyDef("Backlight", 0x99, MAIN_X + 7.5, ROW_TOP, w=0.8, h=0.4, group="functions", label="BL"),
+    KeyDef("Backlight", 0x99, MAIN_X + 7.65, ROW_TOP, w=0.7, h=0.7, group="functions", label="BL"),
 
     # === Row 1: Number row ===
     KeyDef("`",     _hid(0x35), MAIN_X, ROW_1, group="keys"),
@@ -119,9 +119,9 @@ G915X_KEYS: list[KeyDef] = [
 
     KeyDef("Ins",   _hid(0x49), NAV_X, ROW_1, group="functions"),
     KeyDef("Home",  _hid(0x4A), NAV_X + 1.0, ROW_1, group="functions", label="Hm"),
-    KeyDef("PgUp",  _hid(0x4B), NAV_X + 2.0, ROW_1, group="functions", label="PU"),
+    KeyDef("PgUp",  _hid(0x4B), NAV_X + 2.0, ROW_1, group="functions", label="PG▲"),
 
-    KeyDef("NmLk",  _hid(0x53), NUM_X, ROW_1, group="numeric", label="Nm"),
+    KeyDef("NmLk",  _hid(0x53), NUM_X, ROW_1, group="numeric", label="NUM"),
     KeyDef("Num/",  _hid(0x54), NUM_X + 1.0, ROW_1, group="numeric", label="/"),
     KeyDef("Num*",  _hid(0x55), NUM_X + 2.0, ROW_1, group="numeric", label="*"),
     KeyDef("Num-",  _hid(0x56), NUM_X + 3.0, ROW_1, group="numeric", label="-"),
@@ -144,7 +144,7 @@ G915X_KEYS: list[KeyDef] = [
 
     KeyDef("Del",   _hid(0x4C), NAV_X, ROW_2, group="functions"),
     KeyDef("End",   _hid(0x4D), NAV_X + 1.0, ROW_2, group="functions"),
-    KeyDef("PgDn",  _hid(0x4E), NAV_X + 2.0, ROW_2, group="functions", label="PD"),
+    KeyDef("PgDn",  _hid(0x4E), NAV_X + 2.0, ROW_2, group="functions", label="PG▼"),
 
     KeyDef("Num7",  _hid(0x5F), NUM_X, ROW_2, group="numeric", label="7"),
     KeyDef("Num8",  _hid(0x60), NUM_X + 1.0, ROW_2, group="numeric", label="8"),
@@ -222,5 +222,5 @@ for key in G915X_KEYS:
 ALL_ADDRESSES: list[int] = [k.address for k in G915X_KEYS]
 
 # Layout bounds for rendering
-LAYOUT_WIDTH = NUM_X + 4.25
-LAYOUT_HEIGHT = ROW_5 + 1.75
+LAYOUT_WIDTH = NUM_X + 4.0
+LAYOUT_HEIGHT = ROW_5 + 1.0 - ROW_TOP

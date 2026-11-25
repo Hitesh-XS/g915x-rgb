@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.g915xrgb.Controller
+Exec=/usr/bin/g915x-rgb-daemon
+SystemdService=g915x-rgb.service

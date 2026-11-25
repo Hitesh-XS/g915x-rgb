@@ -1,12 +1,14 @@
 [Unit]
-Description=G915 X RGB - Keyboard lighting watcher
+Description=G915 X keyboard lighting
+PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
-Type=simple
-ExecStart=/usr/bin/bash -c 'PYTHONPATH=/home/joshua/Development/g915x-rgb/src /usr/bin/python3 -m g915x_rgb.watcher'
+Type=dbus
+BusName=org.g915xrgb.Controller
+ExecStart=/usr/bin/g915x-rgb-daemon
 Restart=on-failure
-RestartSec=10
+RestartSec=5
 
 [Install]
 WantedBy=graphical-session.target

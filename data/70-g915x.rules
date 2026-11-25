@@ -1,0 +1,4 @@
+# Let the logged-in user control G915 X lighting. Only interface 2 (HID++) is
+# opened up: the other interfaces carry key presses.
+SUBSYSTEM=="hidraw", KERNELS=="0003:046D:C359.*", ENV{G915X_HID}="1"
+SUBSYSTEM=="hidraw", ENV{G915X_HID}=="1", ATTRS{bInterfaceNumber}=="02", TAG+="uaccess"

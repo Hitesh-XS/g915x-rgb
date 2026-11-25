@@ -1,0 +1,50 @@
+# Maintainer: Joshua Santiago <https://github.com/joshman1019>
+pkgname=g915x-rgb-git
+pkgver=r1.0000000
+pkgrel=1
+pkgdesc="Lighting control for the Logitech G915 X keyboard"
+arch=('any')
+url="https://github.com/joshman1019/g915x-rgb"
+license=('MIT')
+depends=('python' 'python-dbus' 'python-gobject' 'pyside6' 'qt6-declarative'
+         'kirigami' 'qqc2-desktop-style')
+makedepends=('git' 'python-build' 'python-installer' 'python-setuptools' 'python-wheel')
+checkdepends=('python-pytest' 'python-evdev')
+optdepends=('python-evdev: typing effects')
+provides=('g915x-rgb')
+conflicts=('g915x-rgb')
+install=g915x-rgb.install
+source=("g915x-rgb::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$srcdir/g915x-rgb"
+  printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+build() {
+  cd "$srcdir/g915x-rgb"
+  rm -rf build dist
+  python -m build --wheel --no-isolation
+}
+
+check() {
+  cd "$srcdir/g915x-rgb"
+  XDG_CONFIG_HOME="$srcdir/test-config" QT_QPA_PLATFORM=offscreen \
+    PYTHONPATH=src python -m pytest -q
+}
+
+package() {
+  cd "$srcdir/g915x-rgb"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+
+  install -Dm644 data/70-g915x.rules "$pkgdir/usr/lib/udev/rules.d/70-g915x.rules"
+  install -Dm644 data/g915x-rgb.service "$pkgdir/usr/lib/systemd/user/g915x-rgb.service"
+  install -Dm644 data/org.g915xrgb.Controller.service \
+    "$pkgdir/usr/share/dbus-1/services/org.g915xrgb.Controller.service"
+  install -Dm644 data/io.github.joshman1019.g915x_rgb.desktop \
+    "$pkgdir/usr/share/applications/io.github.joshman1019.g915x_rgb.desktop"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/g915x-rgb/README.md"
+  install -Dm644 data/70-g915x-typing.rules "$pkgdir/usr/share/doc/g915x-rgb/70-g915x-typing.rules"
+}

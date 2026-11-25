@@ -1,72 +1,33 @@
-"""CLI tool to apply the last-used profile to the keyboard.
+"""Apply a saved profile from the command line: ``g915x-rgb-apply [name]``."""
 
-Used by the systemd service on login/resume.
-Usage: python -m g915x_rgb.apply [profile_name]
-"""
+from __future__ import annotations
 
 import sys
-import time
 
-from .animation import play_animation
-from .backend import G915XBackend, KeyboardNotFoundError
+import dbus
+
 from .config import get_last_profile
-from .profile import Profile, create_default_profile, load_all_profiles
+
+BUS_NAME = "org.g915xrgb.Controller"
 
 
-def apply_profile(profile: Profile, retries: int = 3) -> bool:
-    """Apply a profile to the keyboard with retry logic."""
-    for attempt in range(retries):
-        try:
-            kb = G915XBackend()
-            kb.connect()
-            play_animation(profile.startup_animation, kb, profile=profile)
-            colors = profile.get_all_key_colors()
-            kb.set_all_keys(0, 0, 0)
-            time.sleep(0.1)
-            kb.apply_key_colors(colors)
-            kb.disconnect()
-            return True
-        except KeyboardNotFoundError:
-            if attempt < retries - 1:
-                time.sleep(2)
-            continue
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            if attempt < retries - 1:
-                time.sleep(1)
-            continue
-    return False
-
-
-def main():
-    # Determine which profile to apply
-    if len(sys.argv) > 1:
-        target_name = sys.argv[1]
-    else:
-        target_name = get_last_profile()
-
-    if not target_name:
-        target_name = "Default"
-
-    # Find the profile
-    profiles = load_all_profiles()
-    profile = None
-    for p in profiles:
-        if p.name.lower() == target_name.lower():
-            profile = p
-            break
-
-    if profile is None:
-        profile = create_default_profile()
-        print(f"Profile '{target_name}' not found, using default")
-
-    print(f"Applying profile: {profile.name}")
-    if apply_profile(profile):
-        print("Done!")
-    else:
-        print("Failed to apply profile (keyboard not found)", file=sys.stderr)
-        sys.exit(1)
+def main() -> int:
+    name = " ".join(sys.argv[1:]) or get_last_profile() or "Default"
+    try:
+        # D-Bus starts the service if it is not running.
+        proxy = dbus.SessionBus().get_object(BUS_NAME, "/org/g915xrgb/Controller")
+        daemon = dbus.Interface(proxy, BUS_NAME)
+        daemon.ReloadProfiles()
+        ok = daemon.SetProfile(name, "")
+    except dbus.DBusException as e:
+        print(f"Could not reach the lighting service: {e.get_dbus_message()}", file=sys.stderr)
+        return 1
+    if not ok:
+        print(f"No profile named {name!r}", file=sys.stderr)
+        return 1
+    print(f"Applied {name}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
