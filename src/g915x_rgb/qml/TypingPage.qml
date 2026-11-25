@@ -27,9 +27,16 @@ ColumnLayout {
             delegate: QQC2.Button {
                 required property var modelData
                 text: modelData.label
-                highlighted: root.reactive.effect === modelData.id
-                Accessible.checked: highlighted
-                onClicked: root.editor.setEffect("reactive", "effect", modelData.id)
+                id: choice
+                readonly property bool current: root.reactive.effect === modelData.id
+                checkable: true
+                checked: current
+                icon.name: current ? "checkmark" : ""
+                onClicked: {
+                        root.editor.setEffect("reactive", "effect", choice.modelData.id);
+                        // Clicking toggles the button; keep it tied to the profile.
+                        choice.checked = Qt.binding(() => choice.current);
+                    }
             }
         }
     }

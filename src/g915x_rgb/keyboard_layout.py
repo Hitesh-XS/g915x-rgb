@@ -87,7 +87,7 @@ G915X_KEYS: list[KeyDef] = [
 
     KeyDef("PrtSc", _hid(0x46), NAV_X, ROW_F, group="functions", label="Prt"),
     KeyDef("ScrLk", _hid(0x47), NAV_X + 1.0, ROW_F, group="functions", label="Scr"),
-    KeyDef("Pause", _hid(0x48), NAV_X + 2.0, ROW_F, group="functions", label="Pse"),
+    KeyDef("Pause", _hid(0x48), NAV_X + 2.0, ROW_F, group="functions", label="P/B"),
 
     # Media keys (top-right, above numpad)
     KeyDef("Prev",  0x9E, NUM_X, ROW_F, group="multimedia", label="<<"),
@@ -119,9 +119,9 @@ G915X_KEYS: list[KeyDef] = [
 
     KeyDef("Ins",   _hid(0x49), NAV_X, ROW_1, group="functions"),
     KeyDef("Home",  _hid(0x4A), NAV_X + 1.0, ROW_1, group="functions", label="Hm"),
-    KeyDef("PgUp",  _hid(0x4B), NAV_X + 2.0, ROW_1, group="functions", label="PU"),
+    KeyDef("PgUp",  _hid(0x4B), NAV_X + 2.0, ROW_1, group="functions", label="PG▲"),
 
-    KeyDef("NmLk",  _hid(0x53), NUM_X, ROW_1, group="numeric", label="Nm"),
+    KeyDef("NmLk",  _hid(0x53), NUM_X, ROW_1, group="numeric", label="NUM"),
     KeyDef("Num/",  _hid(0x54), NUM_X + 1.0, ROW_1, group="numeric", label="/"),
     KeyDef("Num*",  _hid(0x55), NUM_X + 2.0, ROW_1, group="numeric", label="*"),
     KeyDef("Num-",  _hid(0x56), NUM_X + 3.0, ROW_1, group="numeric", label="-"),
@@ -144,7 +144,7 @@ G915X_KEYS: list[KeyDef] = [
 
     KeyDef("Del",   _hid(0x4C), NAV_X, ROW_2, group="functions"),
     KeyDef("End",   _hid(0x4D), NAV_X + 1.0, ROW_2, group="functions"),
-    KeyDef("PgDn",  _hid(0x4E), NAV_X + 2.0, ROW_2, group="functions", label="PD"),
+    KeyDef("PgDn",  _hid(0x4E), NAV_X + 2.0, ROW_2, group="functions", label="PG▼"),
 
     KeyDef("Num7",  _hid(0x5F), NUM_X, ROW_2, group="numeric", label="7"),
     KeyDef("Num8",  _hid(0x60), NUM_X + 1.0, ROW_2, group="numeric", label="8"),
@@ -222,5 +222,5 @@ for key in G915X_KEYS:
 ALL_ADDRESSES: list[int] = [k.address for k in G915X_KEYS]
 
 # Layout bounds for rendering
-LAYOUT_WIDTH = NUM_X + 4.25
+LAYOUT_WIDTH = NUM_X + 4.0
 LAYOUT_HEIGHT = ROW_5 + 1.75

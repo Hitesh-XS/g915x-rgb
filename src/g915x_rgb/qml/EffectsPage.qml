@@ -35,9 +35,16 @@ GridLayout {
                     required property var modelData
                     Layout.fillWidth: true
                     text: modelData.label
-                    highlighted: root.current.name === modelData.id
-                    Accessible.checked: highlighted
-                    onClicked: root.editor.setEffect(root.slot, "name", modelData.id)
+                    id: choice
+                    readonly property bool current: root.current.name === modelData.id
+                    checkable: true
+                    checked: current
+                    icon.name: current ? "checkmark" : ""
+                    onClicked: {
+                        root.editor.setEffect(root.slot, "name", choice.modelData.id);
+                        // Clicking toggles the button; keep it tied to the profile.
+                        choice.checked = Qt.binding(() => choice.current);
+                    }
                     QQC2.ToolTip.text: modelData.detail
                     QQC2.ToolTip.visible: hovered
                     QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
