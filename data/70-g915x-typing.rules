@@ -1,0 +1,3 @@
+# OPTIONAL, for typing effects. Lets every program you run read the key presses
+# of this keyboard. Copy to /etc/udev/rules.d/ only if you accept that.
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c359", TAG+="uaccess"

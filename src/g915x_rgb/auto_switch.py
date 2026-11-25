@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from .config import write_json
 from .profile import RULES_PATH
 
 logger = logging.getLogger("g915x.auto_switch")
@@ -112,8 +113,7 @@ class AutoSwitchRules:
 
     def save(self, path: Path = RULES_PATH) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(self.to_dict(), f, indent=2)
+        write_json(path, self.to_dict())
 
     @classmethod
     def load(cls, path: Path = RULES_PATH) -> "AutoSwitchRules":
@@ -122,7 +122,7 @@ class AutoSwitchRules:
         try:
             with open(path) as f:
                 return cls.from_dict(json.load(f))
-        except (OSError, json.JSONDecodeError, KeyError) as e:
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
             logger.warning("could not load auto-switch rules from %s: %s", path, e)
             return cls()
 
@@ -170,6 +170,7 @@ class KWinSource:
             bus = dbus.SessionBus()
             scripting = bus.get_object("org.kde.KWin", "/Scripting")
             iface = dbus.Interface(scripting, "org.kde.kwin.Scripting")
+            iface.unloadScript(str(self._script_path))  # left over from a crash
             self._script_id = int(iface.loadScript(str(self._script_path)))
             iface.start()
             logger.info("KWin auto-switch script loaded (id=%s)", self._script_id)
@@ -216,14 +217,8 @@ def detect_compositor() -> str:
 
 
 def find_kwin_script() -> Path | None:
-    """Locate the bundled KWin JS script, regardless of install layout."""
-    candidates = [
-        # Repo layout (PYTHONPATH=src python -m ...).
-        Path(__file__).resolve().parent.parent.parent / "data" / "kwin_active_window.js",
-        # Installed under a typical share/ prefix.
-        Path("/usr/share/g915x-rgb/kwin_active_window.js"),
-        Path.home() / ".local" / "share" / "g915x-rgb" / "kwin_active_window.js",
-    ]
+    """The KWin script that ships inside this Python package."""
+    candidates = [Path(__file__).resolve().parent / "kwin_active_window.js"]
     for p in candidates:
         if p.exists():
             return p

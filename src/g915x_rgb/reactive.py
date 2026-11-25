@@ -21,6 +21,8 @@ from __future__ import annotations
 import glob
 import logging
 import math
+import os
+import select
 import threading
 import time
 from collections.abc import Callable
@@ -97,69 +99,72 @@ _KEY_Y: dict[int, float] = {k.address: k.y + k.h / 2 for k in G915X_KEYS}
 # =====================================================================
 
 def find_keyboard_event_devices() -> list[str]:
-    """Best-effort enumeration of Logitech keyboard event devices."""
-    devices = sorted(glob.glob("/dev/input/by-id/usb-Logitech_*-event-kbd"))
+    """The G915 X's own key event device; other keyboards are never read."""
+    devices = sorted(glob.glob("/dev/input/by-id/usb-Logitech_G915_X_*-event-kbd"))
     return devices
 
 
 class KeyEventReader:
-    """Background thread reading keypresses from one or more evdev devices."""
+    """Reads key presses on a background thread until stopped."""
 
     def __init__(self, on_press: Callable[[int], None]) -> None:
         if not HAVE_EVDEV:
             raise RuntimeError("python-evdev is not installed")
         self._on_press = on_press
-        self._cancel = threading.Event()
-        self._threads: list[threading.Thread] = []
-        self._devices: list = []
+        self._thread: threading.Thread | None = None
+        self._wake_r, self._wake_w = os.pipe()
 
-    def start(self, paths: list[str]) -> None:
-        if self._threads:
-            return
+    def start(self, paths: list[str]) -> bool:
+        devices = []
         for path in paths:
             try:
-                dev = evdev.InputDevice(path)
+                devices.append(evdev.InputDevice(path))
             except OSError as e:
                 logger.warning("cannot open %s: %s", path, e)
-                continue
-            self._devices.append(dev)
-            t = threading.Thread(target=self._read_loop, args=(dev,),
-                                 daemon=True, name=f"evdev-{path}")
-            t.start()
-            self._threads.append(t)
+        if devices:
+            self._thread = threading.Thread(target=self._run, args=(devices,),
+                                            daemon=True, name="key-reader")
+            self._thread.start()
+        return bool(devices)
 
-    def stop(self, *, timeout: float = 1.0) -> None:
-        self._cancel.set()
-        for dev in self._devices:
-            try:
-                dev.close()
-            except Exception:
-                pass
-        for t in self._threads:
-            t.join(timeout=timeout)
-        self._threads.clear()
-        self._devices.clear()
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
 
-    def _read_loop(self, dev) -> None:
-        try:
-            for event in dev.read_loop():
-                if self._cancel.is_set():
-                    return
-                if event.type != ecodes.EV_KEY:
-                    continue
-                # value: 0=release, 1=press, 2=autorepeat
-                if event.value != 1:
-                    continue
-                addr = EVDEV_TO_ADDR.get(event.code)
-                if addr is None:
-                    continue
-                try:
-                    self._on_press(addr)
-                except Exception:
-                    logger.exception("on_press handler raised")
-        except OSError:
-            # Device disappeared / closed
+    def stop(self) -> None:
+        if self._wake_w < 0:
             return
+        os.write(self._wake_w, b"x")
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        os.close(self._wake_w)
+        os.close(self._wake_r)
+        self._wake_w = self._wake_r = -1
+
+    def _run(self, devices: list) -> None:
+        by_fd = {d.fd: d for d in devices}
+        try:
+            while by_fd:
+                ready, _, _ = select.select([*by_fd, self._wake_r], [], [])
+                if self._wake_r in ready:
+                    return
+                for fd in ready:
+                    try:
+                        self._handle(by_fd[fd].read())
+                    except BlockingIOError:
+                        continue
+                    except OSError:      # unplugged
+                        by_fd.pop(fd).close()
+        finally:
+            for dev in by_fd.values():
+                dev.close()
+
+    def _handle(self, events) -> None:
+        for event in events:
+            # value 1 is a press; releases and autorepeat are ignored.
+            if event.type == ecodes.EV_KEY and event.value == 1:
+                addr = EVDEV_TO_ADDR.get(event.code)
+                if addr is not None:
+                    self._on_press(addr)
 
 
 # =====================================================================
@@ -170,6 +175,8 @@ class KeyEventReader:
 _LIFE_GLOW = 0.6
 _LIFE_RIPPLE = 0.8
 _LIFE_STARBURST = 0.5
+_LIFE_HEAT = 2.5
+MAX_HITS = 64
 
 
 @dataclass
@@ -197,12 +204,14 @@ class ReactiveOverlay:
             return
         with self._lock:
             self._hits.append(_Hit(address, time.monotonic()))
+            del self._hits[:-MAX_HITS]
 
     def _lifetime(self) -> float:
         return {
             "glow": _LIFE_GLOW,
             "ripple": _LIFE_RIPPLE,
             "starburst": _LIFE_STARBURST,
+            "heat": _LIFE_HEAT,
         }.get(self.effect, 0.0)
 
     def __call__(self, now: float) -> dict[int, tuple[RGB, float]]:
@@ -228,6 +237,8 @@ class ReactiveOverlay:
                 self._compose_ripple(hit, t, out)
             elif self.effect == "starburst":
                 self._compose_starburst(hit, t, out)
+            elif self.effect == "heat":
+                self._compose_heat(hit, t, out)
         return out
 
     # --- effect implementations ---
@@ -265,6 +276,19 @@ class ReactiveOverlay:
             if ring < ring_width:
                 local = (1.0 - ring / ring_width) ** 2
                 self._put(out, addr, local * global_fade)
+
+    def _compose_heat(self, hit: _Hit, t: float,
+                      out: dict[int, tuple[RGB, float]]) -> None:
+        """Warmth that builds up where you type and slowly cools."""
+        cx, cy = _KEY_X.get(hit.address), _KEY_Y.get(hit.address)
+        if cx is None or cy is None:
+            return
+        for addr, kx in _KEY_X.items():
+            d = math.hypot(kx - cx, _KEY_Y[addr] - cy)
+            if d < 2.2:
+                add = (1 - d / 2.2) * (1 - t) * 0.5 * self.intensity
+                prev = out.get(addr, (self.color, 0.0))[1]
+                out[addr] = (self.color, min(1.0, prev + add))
 
     def _compose_starburst(self, hit: _Hit, t: float,
                            out: dict[int, tuple[RGB, float]]) -> None:

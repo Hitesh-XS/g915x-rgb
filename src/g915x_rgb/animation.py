@@ -1,7 +1,7 @@
 """Animations for the G915 X keyboard.
 
 Every animation is a generator yielding ``(frame, dt)`` at a uniform
-**30 FPS** with continuous phase math, so:
+**15 FPS** with continuous phase math, so:
 
 * ambient mode loops cleanly without hard resets,
 * mid-flight cfg edits (color sliders, speed, intensity) take effect on
@@ -16,6 +16,7 @@ callback. ``play(..., loop=True)`` keeps it running forever (ambient);
 
 from __future__ import annotations
 
+import colorsys
 import math
 import random
 import threading
@@ -128,12 +129,12 @@ _SORTED_ROWS: list[float] = sorted(_ROWS)
 
 
 def _step(phase: float, speed: float, rate: float) -> float:
-    """Advance ``phase`` by one 30 FPS tick at the given rate × speed."""
+    """Advance ``phase`` by one tick at the given rate × speed."""
     return phase + DT * max(0.05, speed) * rate
 
 
 # =====================================================================
-# Animation implementations — all infinite-loop, all 30 FPS
+# Animation implementations — all infinite-loop, all 15 FPS
 # =====================================================================
 
 @register("aurora", "Aurora borealis — flowing curtains of light")
@@ -330,8 +331,7 @@ def vortex(cfg: AnimationConfig) -> FrameStream:
 def lightning(cfg: AnimationConfig) -> FrameStream:
     """Loopable lightning: a low ambient glow with stochastic bolts that
     stay bright for a few frames then fade."""
-    phase = 0.0
-    rng = random.Random(0xCAFEBABE)
+    rng = random.Random()
     bolt_keys: list[int] = []
     bolt_age = 999
     while True:
@@ -362,8 +362,7 @@ def lightning(cfg: AnimationConfig) -> FrameStream:
                 f[addr] = col
 
         yield f, DT
-        bolt_age += 1
-        phase = _step(phase, cfg.speed, 1.0)
+        bolt_age += max(0.1, cfg.speed)
 
 
 @register("tide", "Ocean tide — sine-modulated waves washing across")
@@ -403,13 +402,13 @@ def wave(cfg: AnimationConfig) -> FrameStream:
         f: Frame = {a: OFF for a in ALL_KEYS}
         for i, col_x in enumerate(_SORTED_COLS):
             d = head - i
-            if -trail < d <= 0.5:
-                if d > -0.5:
+            if 0 <= d < trail:
+                if d < 1:
                     color = (255, 255, 255)
                 else:
                     blend = i / max(n - 1, 1)
                     base = _lerp(primary, secondary, blend)
-                    fade = 1.0 - (-d / trail) * 0.7
+                    fade = 1.0 - (d / trail) * 0.7
                     color = _dim(base, fade)
                 for addr in _COLUMNS[col_x]:
                     f[addr] = color
@@ -439,7 +438,7 @@ def sparkle(cfg: AnimationConfig) -> FrameStream:
                 addr = rng.choice(ALL_KEYS)
                 if addr not in active:
                     state[addr] = rng.choice(palette)
-                    active[addr] = rng.randint(4, 12)
+                    active[addr] = max(1, int(rng.randint(4, 12) / max(0.2, cfg.speed)))
 
         to_remove = []
         for addr, ticks in list(active.items()):
@@ -518,12 +517,13 @@ def matrix(cfg: AnimationConfig) -> FrameStream:
         for col_x, head in drops.items():
             col = cols_by_x[col_x]
             ihead = int(head)
-            use_secondary = hash(col_x) % 5 == 0
+            use_secondary = int(col_x * 2) % 5 == 0
             hc = _lerp(secondary, (255, 255, 255), 0.5) if use_secondary else head_color
             bc = secondary if use_secondary else body_color
             dc = _dim(secondary, 0.5) if use_secondary else dim_body
-            if 0 <= ihead < len(col):
-                state[col[ihead].address] = hc
+            if ihead < len(col):
+                if ihead >= 0:
+                    state[col[ihead].address] = hc
                 if ihead - 1 >= 0:
                     state[col[ihead - 1].address] = bc
                 if ihead - 2 >= 0:
@@ -535,6 +535,75 @@ def matrix(cfg: AnimationConfig) -> FrameStream:
             del drops[col_x]
 
         yield dict(state), DT
+
+
+@register("fire", "Fire — flames rising from the bottom row")
+def fire(cfg: AnimationConfig) -> FrameStream:
+    cols = sorted({round(x) for x in _KX.values()})
+    heat = {c: 0.6 for c in cols}
+    rng = random.Random()
+    phase = 0.0
+    while True:
+        for c in cols:
+            heat[c] += (0.25 + rng.random() * 0.95 - heat[c]) * min(1.0, 0.35 * cfg.speed)
+        f: Frame = {}
+        for a, x in _KX.items():
+            c = round(x)
+            near = (heat[c] * 2 + heat.get(c - 1, heat[c]) + heat.get(c + 1, heat[c])) / 4
+            up = (_Y_MAX - _KY[a]) / (_Y_MAX - _Y_MIN)
+            h = near * 1.35 - up + 0.12 * math.sin(phase + x * 1.7 + up * 6)
+            h = max(0.0, min(1.0, h))
+            f[a] = _dim(_lerp(cfg.primary, cfg.secondary, h * 1.4 - 0.4), min(1.0, h * 1.5))
+        yield f, DT
+        phase = _step(phase, cfg.speed, 5.0)
+
+
+@register("plasma", "Plasma — slow drifting blends")
+def plasma(cfg: AnimationConfig) -> FrameStream:
+    phase = 0.0
+    while True:
+        f: Frame = {}
+        for a, x in _KX.items():
+            y = _KY[a]
+            v = (math.sin(x * 0.5 + phase) + math.sin(y + phase * 1.4 + x * 0.2)
+                 + math.sin(math.hypot(x - _CX, y - _CY) * 0.6 - phase)) / 3
+            f[a] = _lerp(cfg.primary, cfg.secondary, 0.5 + 0.5 * v)
+        yield f, DT
+        phase = _step(phase, cfg.speed, 1.2)
+
+
+@register("starfield", "Starfield — stars streaming from the center")
+def starfield(cfg: AnimationConfig) -> FrameStream:
+    rng = random.Random()
+    stars: list[list[float]] = []
+    while True:
+        if len(stars) < 28:
+            stars.append([rng.uniform(0, math.tau), 0.3])
+        glow = dict.fromkeys(_KX, 0.0)
+        for star in stars:
+            star[1] += DT * cfg.speed * (1.0 + star[1])
+            sx = _CX + math.cos(star[0]) * star[1]
+            sy = _CY + math.sin(star[0]) * star[1] * 0.45
+            for a, x in _KX.items():
+                d = math.hypot(x - sx, _KY[a] - sy)
+                if d < 0.9:
+                    glow[a] = max(glow[a], 1 - d / 0.9)
+        stars = [s for s in stars if s[1] < _MAX_RADIUS + 1]
+        yield {a: _dim(_lerp(cfg.primary, cfg.secondary,
+                             math.hypot(_KX[a] - _CX, _KY[a] - _CY) / _MAX_RADIUS), g)
+               for a, g in glow.items()}, DT
+
+
+@register("rainbow", "Rainbow — the full spectrum sweeping across")
+def rainbow(cfg: AnimationConfig) -> FrameStream:
+    phase = 0.0
+    while True:
+        f: Frame = {}
+        for a, x in _KX.items():
+            r, g, b = colorsys.hsv_to_rgb(((x + _KY[a]) / 24 - phase) % 1.0, 1.0, 1.0)
+            f[a] = (int(r * 255), int(g * 255), int(b * 255))
+        yield f, DT
+        phase = _step(phase, cfg.speed, 0.15) % 1.0
 
 
 # =====================================================================
@@ -621,34 +690,3 @@ class AnimationRunner:
                     return
             if not loop:
                 return
-
-
-# =====================================================================
-# Backwards-compatible synchronous API
-# =====================================================================
-
-def play_animation(name: str, kb, profile=None, *, max_seconds: float = 5.0) -> None:
-    """Run an animation against a backend, capped on real time.
-
-    Used by the legacy ``g915x-rgb-apply`` CLI path. Caps execution so
-    one-shot uses of the now-infinite generators terminate.
-    """
-    if not name or name not in ANIMATIONS:
-        return
-
-    primary = getattr(profile, "animation_primary", (0, 128, 255)) if profile else (0, 128, 255)
-    secondary = getattr(profile, "animation_secondary", (255, 64, 128)) if profile else (255, 64, 128)
-    cfg = AnimationConfig(primary=primary, secondary=secondary)
-
-    factory = ANIMATIONS[name][1]
-    prev: Frame = {}
-    started = time.monotonic()
-    for frame, dt in factory(cfg):
-        if (time.monotonic() - started) >= max_seconds:
-            return
-        diff = {a: c for a, c in frame.items() if prev.get(a) != c}
-        if diff:
-            kb.apply_key_colors(diff)
-        prev = dict(frame)
-        if dt > 0:
-            time.sleep(dt)

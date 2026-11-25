@@ -71,13 +71,18 @@ class Renderer:
         self._lock = threading.Lock()
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
+        self._filter: Callable[[Frame], Frame] | None = None
         self._last_sent: Frame = {}
+        self._ambient_name = ""
+        self._failing = False
 
     # ---------- lifecycle ----------
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
-        self._cancel.clear()
+        self._cancel = threading.Event()
+        # The keyboard may have lost its colors since the last frame.
+        self.invalidate()
         self._thread = threading.Thread(target=self._loop, daemon=True, name="renderer")
         self._thread.start()
 
@@ -95,6 +100,16 @@ class Renderer:
         if t is not None and t.is_alive():
             t.join(timeout=timeout)
         self._thread = None
+
+    def invalidate(self) -> None:
+        """Forget what was sent, so the next frame is sent in full."""
+        with self._lock:
+            self._last_sent = {}
+
+    def set_filter(self, fn: Callable[[Frame], Frame] | None) -> None:
+        """Final pass over each frame: dimming, blanking, indicators."""
+        with self._lock:
+            self._filter = fn
 
     # ---------- layer setters ----------
     def set_base(self, frame: Frame) -> None:
@@ -125,6 +140,7 @@ class Renderer:
         runner_box.append(runner)
         with self._lock:
             self._state.ambient_runner = runner
+            self._ambient_name = name
         runner.play(name, cfg, loop=True)
 
     def stop_ambient(self) -> None:
@@ -147,6 +163,11 @@ class Renderer:
             return None
         runner.update_config(**kwargs)
         return runner.cfg
+
+    def ambient_name(self) -> str:
+        """Name of the looping animation, or "" (also during a one-shot)."""
+        with self._lock:
+            return self._ambient_name if self._state.ambient_runner is not None else ""
 
     def has_ambient(self) -> bool:
         with self._lock:
@@ -180,6 +201,7 @@ class Renderer:
         runner_box.append(runner)
         with self._lock:
             self._state.ambient_runner = runner
+            self._ambient_name = ""
 
         # Wrap on_done so the ambient slot self-clears when the one-shot ends.
         def _done_thread():
@@ -293,22 +315,36 @@ class Renderer:
                     else:
                         merged[addr] = _lerp(base_c, color, alpha)
                 content = merged
-        return content
+        with self._lock:
+            post = self._filter
+        return post(content) if post is not None else content
 
     def _diff_send(self, frame: Frame) -> None:
-        diff = {a: c for a, c in frame.items() if self._last_sent.get(a) != c}
+        with self._lock:
+            last = self._last_sent
+        diff = {a: c for a, c in frame.items() if last.get(a) != c}
         if not diff:
+            self._failing = False
             return
         try:
             self._kb.apply_key_colors(diff)
-        except Exception:
-            logger.exception("backend apply_key_colors failed")
+        except OSError as e:
+            # Some of the batch may have landed: resend everything next time.
+            self.invalidate()
+            if not self._failing:
+                logger.warning("keyboard write failed, retrying: %s", e)
+            self._failing = True
+            self._cancel.wait(0.5)
             return
-        self._last_sent.update(diff)
+        self._failing = False
+        with self._lock:
+            if self._last_sent is last:
+                self._last_sent = {**last, **diff}
 
     def _loop(self) -> None:
+        cancel = self._cancel
         next_tick = time.monotonic()
-        while not self._cancel.is_set():
+        while not cancel.is_set():
             now = time.monotonic()
             try:
                 frame = self._compose(now)
@@ -320,7 +356,7 @@ class Renderer:
             next_tick += self._period
             sleep_for = next_tick - time.monotonic()
             if sleep_for > 0:
-                if self._cancel.wait(sleep_for):
+                if cancel.wait(sleep_for):
                     return
             else:
                 # Fell behind — reset cadence rather than catching up in a tight loop.

@@ -9,6 +9,10 @@ batch / range / single-key functions.
 
 from __future__ import annotations
 
+import errno
+
+import pytest
+
 from g915x_rgb.backend import (
     DEVICE_INDEX,
     FUNC_COMMIT,
@@ -17,6 +21,16 @@ from g915x_rgb.backend import (
     FUNC_SET_RANGE,
     G915XBackend,
 )
+
+
+_patches: list[pytest.MonkeyPatch] = []
+
+
+@pytest.fixture(autouse=True)
+def _undo_patches():
+    yield
+    while _patches:
+        _patches.pop().undo()
 
 
 class _FakeFd:
@@ -45,10 +59,11 @@ def _backend(fd_value: int = 999) -> tuple[G915XBackend, _FakeFd]:
     def fake_read(*_a, **_kw):
         raise BlockingIOError
 
-    import g915x_rgb.backend as backend
-    backend.os.write = fake_write     # type: ignore[attr-defined]
-    backend.select.select = fake_select  # type: ignore[attr-defined]
-    backend.os.read = fake_read       # type: ignore[attr-defined]
+    mp = pytest.MonkeyPatch()
+    _patches.append(mp)
+    mp.setattr("g915x_rgb.backend.os.write", fake_write)
+    mp.setattr("g915x_rgb.backend.select.select", fake_select)
+    mp.setattr("g915x_rgb.backend.os.read", fake_read)
     return kb, fake
 
 
@@ -117,3 +132,45 @@ def test_apply_key_colors_splits_standard_and_special():
     assert funcs.count(FUNC_COMMIT) == 3
     assert any(m[4] == 0x69 for m in fake.writes)
     assert any(m[4] == 0xB4 for m in fake.writes)
+
+
+def test_write_errors_are_reported():
+    kb, _ = _backend()
+
+    def gone(*_a):
+        raise OSError(errno.ENODEV, "gone")
+
+    _patches[-1].setattr("g915x_rgb.backend.os.write", gone)
+    with pytest.raises(OSError):
+        kb.commit()
+
+
+def test_full_queue_is_retried():
+    kb, fake = _backend()
+    tries = []
+
+    def busy(_fd, data):
+        tries.append(1)
+        if len(tries) < 3:
+            raise BlockingIOError
+        fake.write_all(data)
+
+    _patches[-1].setattr("g915x_rgb.backend.os.write", busy)
+    kb.commit()
+    assert len(fake.writes) == 1
+
+
+def test_reply_matching_skips_unrelated_packets():
+    kb, _ = _backend()
+    request = [0x10, DEVICE_INDEX, 0x05, 0x1A, 0, 0, 0]
+    packets = [bytes([0x11, DEVICE_INDEX, 0x07, 0x70] + [0] * 16),
+               bytes([0x10, DEVICE_INDEX, 0x05, 0x1A, 77, 0, 0])]
+    polls = []
+
+    def select_(*_a):
+        polls.append(1)
+        return ([1], [], []) if len(polls) > 1 else ([], [], [])
+
+    _patches[-1].setattr("g915x_rgb.backend.select.select", select_)
+    _patches[-1].setattr("g915x_rgb.backend.os.read", lambda *_a: packets.pop(0))
+    assert kb._send_recv(request)[4] == 77

@@ -5,12 +5,14 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
+
 from g915x_rgb.animation import (
     ANIMATIONS,
     AnimationConfig,
     AnimationRunner,
-    register,
 )
+from g915x_rgb.keyboard_layout import ALL_ADDRESSES, KEY_BY_ADDRESS
 
 
 def _record_runner():
@@ -24,28 +26,46 @@ def _record_runner():
     return received, lock, AnimationRunner(on_frame=on_frame)
 
 
-def test_runs_a_known_animation_to_completion():
+def _wait(condition, seconds=3.0):
+    deadline = time.monotonic() + seconds
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return condition()
+
+
+def test_duration_ends_a_one_shot():
     received, _, runner = _record_runner()
-    runner.play("pulse", AnimationConfig(speed=20.0))  # speed it up so the test is quick
-    # pulse generates ~62 frames; allow generous timeout.
-    deadline = time.monotonic() + 4.0
-    while runner.is_running() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert not runner.is_running()
-    assert len(received) > 10
+    runner.play("pulse", AnimationConfig(), duration=0.3)
+    assert _wait(lambda: not runner.is_running())
+    assert received
 
 
-def test_play_cancels_previous_animation():
-    received, lock, runner = _record_runner()
-    runner.play("aurora", AnimationConfig(speed=0.5))   # slow, ~7s
-    time.sleep(0.05)
-    assert runner.is_running()
+def test_play_replaces_previous_animation():
+    _, _, runner = _record_runner()
+    runner.play("aurora", AnimationConfig())
+    first = runner._thread
+    runner.play("pulse", AnimationConfig(), duration=0.2)
+    assert not first.is_alive()
+    assert _wait(lambda: not runner.is_running())
 
-    runner.play("pulse", AnimationConfig(speed=20.0))
-    deadline = time.monotonic() + 4.0
-    while runner.is_running() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert not runner.is_running()
+
+@pytest.mark.parametrize("name", sorted(ANIMATIONS))
+def test_every_animation_yields_complete_valid_frames(name):
+    stream = ANIMATIONS[name][1](AnimationConfig(speed=3.0))
+    frames = [next(stream)[0] for _ in range(150)]
+    for frame in frames:
+        assert set(frame) == set(ALL_ADDRESSES)
+        assert all(0 <= v <= 255 and isinstance(v, int) for c in frame.values() for v in c)
+    assert any(f != frames[0] for f in frames)
+
+
+def test_wave_trail_follows_its_head():
+    stream = ANIMATIONS["wave"][1](AnimationConfig(primary=(255, 0, 0), secondary=(255, 0, 0)))
+    for _ in range(8):
+        frame = next(stream)[0]
+    lit = [KEY_BY_ADDRESS[a].x for a, c in frame.items() if c != (0, 0, 0)]
+    head = [KEY_BY_ADDRESS[a].x for a, c in frame.items() if c == (255, 255, 255)]
+    assert head and max(lit) <= max(head) and min(lit) < min(head)
 
 
 def test_unknown_animation_is_a_noop():

@@ -5,15 +5,19 @@ The keyboard only supports 7-byte (report 0x10) and 20-byte (report 0x11) messag
 Key addresses follow HID Usage Table codes minus 3 offset.
 """
 
+import errno
 import glob
 import os
 import select
+import threading
 import time
 
 
 VENDOR_ID = 0x046D
 PRODUCT_ID = 0xC359
 DEVICE_INDEX = 0x01  # Keyboard behind Lightspeed receiver
+SOFTWARE_ID = 0x0A    # Tags our requests so replies can be matched
+WRITE_TIMEOUT = 0.1
 HID_KEYCODE_OFFSET = 3  # Logitech address = HID keycode - 3
 
 # Feature IDs discovered via enumeration
@@ -30,6 +34,18 @@ FUNC_SET_BATCH = 0x60         # Function 6: set up to 13 keys to same color
 FUNC_COMMIT = 0x70            # Function 7: commit/apply changes
 
 
+def device_present() -> bool:
+    """Whether the keyboard is plugged in (reads sysfs, opens nothing)."""
+    for path in glob.glob("/sys/class/hidraw/hidraw*/device/uevent"):
+        try:
+            with open(path) as f:
+                if f"HID_ID=0003:{VENDOR_ID:08X}:{PRODUCT_ID:08X}" in f.read().upper():
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 class KeyboardNotFoundError(Exception):
     pass
 
@@ -39,6 +55,7 @@ class G915XBackend:
 
     def __init__(self):
         self._fd = None
+        self._lock = threading.RLock()
         self._hidraw_path = None
         self._pkb_index = None  # PerKeyBacklight feature index
         self._battery_index: int | None = None
@@ -63,7 +80,11 @@ class G915XBackend:
         self._fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
 
         # Discover the feature index for PerKeyBacklightV2
-        self._pkb_index = self._get_feature_index(FEATURE_PER_KEY_BACKLIGHT)
+        try:
+            self._pkb_index = self._get_feature_index(FEATURE_PER_KEY_BACKLIGHT)
+        except OSError:
+            self.disconnect()
+            raise
         if self._pkb_index is None:
             self.disconnect()
             raise KeyboardNotFoundError(
@@ -71,12 +92,16 @@ class G915XBackend:
             )
 
     def disconnect(self) -> None:
-        if self._fd is not None:
-            os.close(self._fd)
-            self._fd = None
-            self._pkb_index = None
-            self._battery_index = None
-            self._battery_feature = None
+        with self._lock:
+            if self._fd is None:
+                return
+            try:
+                os.close(self._fd)
+            finally:
+                self._fd = None
+                self._pkb_index = None
+                self._battery_index = None
+                self._battery_feature = None
 
     def _find_hidraw_device(self) -> str | None:
         """Find the hidraw device for interface 2 of the G915 X."""
@@ -110,73 +135,81 @@ class G915XBackend:
                 if "INTERFACE=3/0/0" in parent_uevent:
                     return f"/dev/{name}"
 
-            except (FileNotFoundError, ValueError, IndexError):
+            except (OSError, ValueError, IndexError):
                 continue
 
         return None
 
-    def _drain(self) -> None:
-        """Read and discard all pending data."""
-        while True:
-            r, _, _ = select.select([self._fd], [], [], 0.01)
-            if not r:
-                break
-            try:
-                os.read(self._fd, 64)
-            except (BlockingIOError, OSError):
-                break
+    def _write(self, data: list[int]) -> None:
+        """Write one report, waiting briefly if the kernel queue is full.
 
-    def _send(self, data: list[int]) -> None:
-        """Send a HID++ message (no response expected).
-
-        Tolerates transient ``BlockingIOError`` from a saturated kernel
-        HID write queue: short backoff + one retry, then drop the
-        message. Letting the exception propagate would stall the
-        renderer's send loop and cause a visible freeze.
+        Raises OSError when the write cannot be completed, so callers never
+        record an update as sent when it was not.
         """
         buf = bytes(data)
-        try:
-            os.write(self._fd, buf)
-        except BlockingIOError:
-            time.sleep(0.001)
+        deadline = time.monotonic() + WRITE_TIMEOUT
+        while True:
+            if self._fd is None:
+                raise OSError(errno.ENODEV, "keyboard is not connected")
             try:
                 os.write(self._fd, buf)
-            except (BlockingIOError, OSError):
                 return
-        except OSError:
-            return
-        # Quick non-blocking read to prevent buffer buildup
-        try:
-            r, _, _ = select.select([self._fd], [], [], 0)
-            if r:
-                os.read(self._fd, 64)
-        except (BlockingIOError, OSError):
-            pass
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.002)
 
-    def _send_recv(self, data: list[int], timeout: float = 0.2) -> bytes | None:
-        """Send a HID++ message and wait for a response."""
-        self._drain()
-        os.write(self._fd, bytes(data))
-        time.sleep(timeout)
-        try:
-            r, _, _ = select.select([self._fd], [], [], 0.1)
-            if r:
-                return os.read(self._fd, 64)
-        except (BlockingIOError, OSError):
-            pass
+    def _drain(self) -> None:
+        """Discard everything the keyboard has already sent."""
+        while True:
+            r, _, _ = select.select([self._fd], [], [], 0)
+            if not r:
+                return
+            try:
+                if not os.read(self._fd, 64):
+                    return
+            except OSError:
+                return
+
+    def _send(self, data: list[int]) -> None:
+        """Send a message whose reply is not needed."""
+        with self._lock:
+            self._write(data)
+            self._drain()
+
+    def _send_recv(self, data: list[int], timeout: float = 0.5) -> bytes | None:
+        """Send a request and return the reply that belongs to it.
+
+        Replies are matched on device, feature index and function, so
+        notifications and acknowledgements of color writes are skipped.
+        """
+        with self._lock:
+            if self._fd is None:
+                return None
+            self._drain()
+            self._write(data)
+            deadline = time.monotonic() + timeout
+            while (left := deadline - time.monotonic()) > 0:
+                r, _, _ = select.select([self._fd], [], [], left)
+                if not r:
+                    return None
+                try:
+                    resp = os.read(self._fd, 64)
+                except BlockingIOError:
+                    continue
+                if len(resp) < 7 or resp[1] != data[1]:
+                    continue
+                if resp[2] == data[2] and resp[3] == data[3]:
+                    return resp
+                if resp[2] in (0x8F, 0xFF) and resp[3] == data[2] and resp[4] == data[3]:
+                    return None
         return None
 
     def _get_feature_index(self, feature_id: int) -> int | None:
-        """Query IRoot.getFeature to find the index of a feature."""
-        hi = (feature_id >> 8) & 0xFF
-        lo = feature_id & 0xFF
-        resp = self._send_recv(
-            [0x10, DEVICE_INDEX, 0x00, 0x00, hi, lo, 0x00]
-        )
-        if resp and resp[2] != 0xFF:
-            idx = resp[4]
-            return idx if idx != 0 else None
-        return None
+        """Ask IRoot for a feature's index; None when it is unsupported."""
+        resp = self._send_recv([0x10, DEVICE_INDEX, 0x00, 0x00 | SOFTWARE_ID,
+                                feature_id >> 8, feature_id & 0xFF, 0x00])
+        return (resp[4] or None) if resp else None
 
     def set_key_color(self, address: int, r: int, g: int, b: int) -> None:
         """Set a single key color (does not commit)."""
@@ -282,7 +315,7 @@ class G915XBackend:
 
     def _ensure_connected(self) -> None:
         if self._fd is None:
-            self.connect()
+            raise OSError(errno.ENODEV, "keyboard is not connected")
 
     def get_battery(self) -> tuple[int, bool] | None:
         """Query battery status.
@@ -305,9 +338,10 @@ class G915XBackend:
         if self._battery_index is None:
             return None
 
-        # Function 1 == getStatus. Encoded as (fn << 4) | swid in byte 3.
+        # Status is function 1 for 0x1004 and function 0 for 0x1000.
         resp = self._send_recv(
-            [0x10, DEVICE_INDEX, self._battery_index, 0x10, 0x00, 0x00, 0x00]
+            [0x10, DEVICE_INDEX, self._battery_index,
+             (0x10 if self._battery_feature == FEATURE_UNIFIED_BATTERY else 0x00) | SOFTWARE_ID, 0x00, 0x00, 0x00]
         )
         if resp is None or len(resp) < 7 or resp[2] == 0xFF:
             return None

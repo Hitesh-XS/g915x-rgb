@@ -1,0 +1,205 @@
+"""Renderer, profile storage and daemon behavior, with a fake keyboard."""
+
+from __future__ import annotations
+
+import json
+import time
+
+import pytest
+
+from g915x_rgb import config
+from g915x_rgb.keyboard_layout import ALL_ADDRESSES, KEY_GROUPS
+from g915x_rgb.profile import Profile, load_all_profiles
+from g915x_rgb.renderer import Renderer
+
+pytest.importorskip("dbus")
+from g915x_rgb import daemon  # noqa: E402
+
+
+class FakeKeyboard:
+    def __init__(self):
+        self.is_connected = False
+        self.lit = {}
+        self.sent = 0
+        self.fail = False
+
+    def connect(self):
+        self.is_connected = True
+
+    def disconnect(self):
+        self.is_connected = False
+
+    def get_battery(self):
+        return (10, False)
+
+    def apply_key_colors(self, colors):
+        if self.fail:
+            raise OSError("gone")
+        self.sent += len(colors)
+        self.lit.update(colors)
+
+
+def wait(condition, seconds=3.0):
+    end = time.monotonic() + seconds
+    while not condition() and time.monotonic() < end:
+        time.sleep(0.02)
+    return condition()
+
+
+def solid(name, color, **kw):
+    return Profile(name=name, group_colors={g: color for g in KEY_GROUPS}, **kw)
+
+
+def test_failed_frame_is_sent_again():
+    kb = FakeKeyboard()
+    r = Renderer(kb)
+    kb.fail = True
+    r._cancel.set()
+    r._diff_send({1: (9, 9, 9)})
+    kb.fail = False
+    r._diff_send({1: (9, 9, 9)})
+    assert kb.lit == {1: (9, 9, 9)}
+
+
+def test_restart_resends_everything():
+    kb = FakeKeyboard()
+    r = Renderer(kb)
+    r.set_base({1: (9, 9, 9)})
+    r.start()
+    assert wait(lambda: kb.lit)
+    r.stop()
+    kb.lit = {}
+    r.start()
+    assert wait(lambda: kb.lit)
+    r.stop()
+
+
+def test_names_that_look_alike_do_not_overwrite(home):
+    a, b = Profile(name="A b"), Profile(name="A/b")
+    assert a.save() != b.save()
+    assert {p.name for p in load_all_profiles()} == {"A b", "A/b"}
+
+
+def test_delete_and_rename_leave_no_files_behind(home):
+    p = Profile(name="One")
+    p.save()
+    p.name = "Two"
+    p.save()
+    assert [q.name for q in load_all_profiles()] == ["Two"]
+    p.delete()
+    assert load_all_profiles() == []
+
+
+def test_unset_groups_are_black():
+    colors = Profile(name="x", group_colors={"keys": (1, 1, 1)}).get_all_key_colors()
+    assert set(colors) == set(ALL_ADDRESSES)
+    assert colors[KEY_GROUPS["logo"][0].address] == (0, 0, 0)
+
+
+def test_damaged_profile_is_skipped(home):
+    Profile(name="Good").save()
+    (home / "profiles" / "bad.json").write_text('{"groups": {"keys": "zzz"}}')
+    (home / "profiles" / "list.json").write_text("[]")
+    assert [p.name for p in load_all_profiles()] == ["Good"]
+
+
+def test_options_reject_unknown_names_and_types(home):
+    assert not config.set_option("nope", 1)
+    assert not config.set_option("idle_minutes", True)
+    assert config.set_option("idle_minutes", 5)
+    config.set_last_profile("x")
+    assert config.get_options()["idle_minutes"] == 5
+
+
+@pytest.fixture
+def ctl(home):
+    solid("Red", (255, 0, 0)).save()
+    solid("Blue", (0, 0, 255)).save()
+    kb = FakeKeyboard()
+    c = daemon.Controller(kb, defer=lambda fn: fn())
+    c.reload_profiles()
+    config.set_last_profile("Red")
+    c.connect()
+    yield c, kb
+    c.disconnect()
+
+
+def all_lit(kb, color):
+    return wait(lambda: len(kb.lit) == len(ALL_ADDRESSES) and set(kb.lit.values()) == {color})
+
+
+def test_last_profile_is_applied_on_connect(ctl):
+    assert all_lit(ctl[1], (255, 0, 0))
+
+
+def test_reconnect_restores_lighting(ctl):
+    c, kb = ctl
+    assert all_lit(kb, (255, 0, 0))
+    c.disconnect()
+    kb.lit = {}
+    c.connect()
+    assert all_lit(kb, (255, 0, 0))
+
+
+def test_preview_is_temporary(ctl):
+    c, kb = ctl
+    assert c.preview(json.dumps(solid("tmp", (1, 2, 3)).to_dict()))
+    assert all_lit(kb, (1, 2, 3))
+    assert config.get_last_profile() == "Red"
+    c.stop_preview()
+    assert all_lit(kb, (255, 0, 0))
+    assert not c.preview("not json")
+
+
+def test_transition_ends_on_the_new_profile(ctl):
+    c, kb = ctl
+    assert c.set_profile("Blue", "fade")
+    assert all_lit(kb, (0, 0, 255))
+
+
+def test_stale_animation_does_not_return(home):
+    late = []
+    c = daemon.Controller(FakeKeyboard(), defer=late.append)
+    animated = solid("a", (1, 1, 1))
+    animated.ambient.name = animated.startup.name = "plasma"
+    c._show(animated, startup=True)
+    c._show(solid("b", (2, 2, 2)))
+    assert wait(lambda: late)
+    for fn in late:
+        fn()
+    assert c._renderer.ambient_name() == ""
+
+
+def test_lock_turns_off_and_unlock_restores(ctl):
+    c, kb = ctl
+    assert all_lit(kb, (255, 0, 0))
+    c.set_locked(True)
+    assert all_lit(kb, (0, 0, 0))
+    c.set_locked(False)
+    assert all_lit(kb, (255, 0, 0))
+
+
+def test_idle_dims(ctl):
+    c, kb = ctl
+    c._set_idle(True)
+    assert all_lit(kb, (38, 0, 0))
+
+
+def test_low_battery_marks_g_keys(ctl):
+    c, kb = ctl
+    c.set_profile("Blue")
+    c.set_option("battery_gkeys", True)
+    g1 = KEY_GROUPS["gkeys"][0].address
+    assert wait(lambda: kb.lit.get(g1) == (255, 0, 0))
+
+
+def test_rules_switch_profiles_but_not_during_a_preview(ctl):
+    c, _ = ctl
+    c.rules = daemon.AutoSwitchRules.from_dict(
+        {"enabled": True, "rules": [{"profile": "Blue", "class_regex": "^steam$"}]})
+    c.preview(json.dumps(solid("tmp", (1, 2, 3)).to_dict()))
+    c.window_changed("steam", "")
+    assert c.status.current_profile == "Red"
+    c.stop_preview()
+    c.window_changed("steam", "")
+    assert c.status.current_profile == "Blue"

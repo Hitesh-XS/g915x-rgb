@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=G915 X Lighting
+Comment=Lighting for the Logitech G915 X keyboard
+Exec=g915x-rgb
+Icon=input-keyboard
+Categories=Qt;KDE;Settings;HardwareSettings;
+Keywords=keyboard;rgb;logitech;g915;lighting;

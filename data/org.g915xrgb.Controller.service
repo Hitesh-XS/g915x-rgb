@@ -1,3 +1,4 @@
 [D-BUS Service]
 Name=org.g915xrgb.Controller
-Exec=/usr/bin/bash -c 'PYTHONPATH=/home/joshua/Development/g915x-rgb/src /usr/bin/python3 -m g915x_rgb.daemon'
+Exec=/usr/bin/g915x-rgb-daemon
+SystemdService=g915x-rgb.service

@@ -1,10 +1,12 @@
 [Unit]
-Description=G915 X RGB - keyboard daemon (renderer + auto-switch + reactive)
+Description=G915 X keyboard lighting
+PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
-Type=simple
-ExecStart=/usr/bin/bash -c 'PYTHONPATH=/home/joshua/Development/g915x-rgb/src /usr/bin/python3 -m g915x_rgb.daemon'
+Type=dbus
+BusName=org.g915xrgb.Controller
+ExecStart=/usr/bin/g915x-rgb-daemon
 Restart=on-failure
 RestartSec=5
 

@@ -23,10 +23,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from .keyboard_layout import KEY_BY_NAME, G915X_KEYS
+from .config import CONFIG_DIR
+from .keyboard_layout import G915X_KEYS, KEY_BY_ADDRESS, KEY_BY_NAME
 
-PROFILES_DIR = Path.home() / ".config" / "g915x-rgb" / "profiles"
-RULES_PATH = Path.home() / ".config" / "g915x-rgb" / "auto_switch.json"
+PROFILES_DIR = CONFIG_DIR / "profiles"
+RULES_PATH = CONFIG_DIR / "auto_switch.json"
 
 SCHEMA_VERSION = 2
 
@@ -128,17 +129,15 @@ class Profile:
     def get_effective_color(self, address: int) -> RGB:
         if address in self.key_colors:
             return self.key_colors[address]
-        for key in G915X_KEYS:
-            if key.address == address and key.group in self.group_colors:
-                return self.group_colors[key.group]
-        return (0, 0, 0)
+        key = KEY_BY_ADDRESS.get(address)
+        return self.group_colors.get(key.group, (0, 0, 0)) if key else (0, 0, 0)
 
     def get_all_key_colors(self) -> dict[int, RGB]:
-        colors: dict[int, RGB] = {}
-        for key in G915X_KEYS:
-            if key.group in self.group_colors:
-                colors[key.address] = self.group_colors[key.group]
-        colors.update(self.key_colors)
+        """Every key's color. Unset keys are black, so nothing from a
+        previously applied profile stays lit."""
+        colors = {k.address: self.group_colors.get(k.group, (0, 0, 0))
+                  for k in G915X_KEYS}
+        colors.update({a: c for a, c in self.key_colors.items() if a in colors})
         return colors
 
     # ----- serialization -----
@@ -205,8 +204,8 @@ class Profile:
     def save(self) -> Path:
         """Atomically write the profile to disk; remove the prior file if renamed."""
         PROFILES_DIR.mkdir(parents=True, exist_ok=True)
-        filename = _safe_filename(self.name) + ".json"
-        path = PROFILES_DIR / filename
+        path = self._target_path()
+        filename = path.name
 
         fd, tmp_name = tempfile.mkstemp(
             prefix=f".{filename}.", dir=str(PROFILES_DIR), suffix=".tmp",
@@ -227,6 +226,21 @@ class Profile:
             self._saved_path.unlink()
         self._saved_path = path
         return path
+
+    def _target_path(self) -> Path:
+        """A path for this name that no other profile is using."""
+        stem = _safe_filename(self.name)
+        path, n = PROFILES_DIR / f"{stem}.json", 2
+        while path != self._saved_path and path.exists():
+            path = PROFILES_DIR / f"{stem}_{n}.json"
+            n += 1
+        return path
+
+    def delete(self) -> None:
+        """Remove the profile's file, if it has one."""
+        if self._saved_path is not None:
+            self._saved_path.unlink(missing_ok=True)
+            self._saved_path = None
 
     @classmethod
     def load(cls, path: Path) -> "Profile":
@@ -259,7 +273,7 @@ def load_all_profiles_with_errors() -> LoadResult:
     for path in list_profiles():
         try:
             profiles.append(Profile.load(path))
-        except (json.JSONDecodeError, KeyError, ValueError, OSError) as e:
+        except (KeyError, ValueError, TypeError, AttributeError, OSError) as e:
             errors.append((path, f"{type(e).__name__}: {e}"))
     return LoadResult(profiles=profiles, errors=errors)
 
@@ -316,7 +330,9 @@ def duplicate_profile(p: Profile, new_name: str) -> Profile:
 # =====================================================================
 
 def _parse_hex(hex_str: str) -> RGB:
-    hex_str = hex_str.lstrip("#")
+    hex_str = str(hex_str).lstrip("#")
+    if not re.fullmatch(r"[0-9a-fA-F]{6}", hex_str):
+        raise ValueError(f"not a color: {hex_str!r}")
     return (
         int(hex_str[0:2], 16),
         int(hex_str[2:4], 16),

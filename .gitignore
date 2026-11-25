@@ -8,3 +8,8 @@ build/
 *.egg
 .venv/
 venv/
+
+packaging/*.pkg.tar.*
+packaging/src/
+packaging/pkg/
+packaging/g915x-rgb/
