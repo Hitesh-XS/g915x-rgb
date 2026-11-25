@@ -14,7 +14,7 @@ sudo udevadm trigger
 # Install systemd user service
 echo "Installing systemd user service..."
 mkdir -p ~/.config/systemd/user
-sed "s|PYTHONPATH=.*|PYTHONPATH=$SCRIPT_DIR/src|" \
+sed "s|PYTHONPATH=[^ ]*|PYTHONPATH=$SCRIPT_DIR/src|" \
     "$SCRIPT_DIR/data/g915x-rgb.service" > ~/.config/systemd/user/g915x-rgb.service
 systemctl --user daemon-reload
 systemctl --user enable g915x-rgb.service
