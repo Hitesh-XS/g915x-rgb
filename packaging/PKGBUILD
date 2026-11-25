@@ -1,12 +1,12 @@
-# Maintainer: Joshua Santiago <https://github.com/joshman1019>
+# Maintainer: Joshua Santiago <joshman1019 at gmail dot com>
 pkgname=g915x-rgb-git
-pkgver=r1.0000000
+pkgver=r32.e645abe
 pkgrel=1
 pkgdesc="Lighting control for the Logitech G915 X keyboard"
 arch=('any')
 url="https://github.com/joshman1019/g915x-rgb"
 license=('MIT')
-depends=('python' 'python-dbus' 'python-gobject' 'pyside6' 'qt6-declarative'
+depends=('glib2' 'python' 'python-dbus' 'python-gobject' 'pyside6' 'qt6-declarative'
          'kirigami' 'qqc2-desktop-style')
 makedepends=('git' 'python-build' 'python-installer' 'python-setuptools' 'python-wheel')
 checkdepends=('python-pytest' 'python-evdev')
