@@ -50,7 +50,8 @@ Item {
             }
         }
 
-        // No light address is known for game mode, so it cannot be selected.
+        // Not selectable: the keyboard reports eight light addresses beyond the
+        // ones used here, and on real hardware none of them lit game mode.
         Rectangle {
             x: (1.25 + 6.65 + root.originX) * root.unit
             y: (-0.85 + root.originY) * root.unit
