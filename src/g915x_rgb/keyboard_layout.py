@@ -45,7 +45,7 @@ MAIN_X = 1.25       # Main keyboard area start X (after G-keys + small gap)
 NAV_X = MAIN_X + 15.5   # Nav cluster (0.5u gap after main 15u)
 NUM_X = NAV_X + 3.5     # Numpad (0.5u gap after nav 3u)
 
-ROW_TOP = -0.5      # Top row Y (logo, G6-G9, backlight — above function row)
+ROW_TOP = -0.85     # Top row Y (logo, G6-G9, backlight — above function row)
 ROW_F = 0.0         # Function row Y
 ROW_1 = 1.5         # Number row Y (1.5u gap = visual separation)
 ROW_2 = 2.5
@@ -62,10 +62,10 @@ G915X_KEYS: list[KeyDef] = [
     KeyDef("G4", 0xB7, G_COL, ROW_4, w=G_W, group="gkeys"),
     KeyDef("G5", 0xB8, G_COL, ROW_5, w=G_W, group="gkeys"),
     # G6-G9: horizontal row above F1-F4
-    KeyDef("G6", 0xB9, MAIN_X + 2.0, ROW_TOP, w=0.8, h=0.4, group="gkeys"),
-    KeyDef("G7", 0xBA, MAIN_X + 3.0, ROW_TOP, w=0.8, h=0.4, group="gkeys"),
-    KeyDef("G8", 0xBB, MAIN_X + 4.0, ROW_TOP, w=0.8, h=0.4, group="gkeys"),
-    KeyDef("G9", 0xBC, MAIN_X + 5.0, ROW_TOP, w=0.8, h=0.4, group="gkeys"),
+    KeyDef("G6", 0xB9, MAIN_X + 2.15, ROW_TOP, w=0.7, h=0.7, group="gkeys"),
+    KeyDef("G7", 0xBA, MAIN_X + 3.15, ROW_TOP, w=0.7, h=0.7, group="gkeys"),
+    KeyDef("G8", 0xBB, MAIN_X + 4.15, ROW_TOP, w=0.7, h=0.7, group="gkeys"),
+    KeyDef("G9", 0xBC, MAIN_X + 5.15, ROW_TOP, w=0.7, h=0.7, group="gkeys"),
 
     # === Function row ===
     KeyDef("Esc",  _hid(0x29), MAIN_X, ROW_F, group="functions"),
@@ -96,10 +96,10 @@ G915X_KEYS: list[KeyDef] = [
     KeyDef("Mute",  0x9C, NUM_X + 3.0, ROW_F, group="multimedia", label="Mute"),
 
     # Logo LED (top-left, above G1)
-    KeyDef("Logo",  0xD2, G_COL, ROW_TOP - 0.1, w=1.0, h=0.5, group="logo"),
+    KeyDef("Logo",  0xD2, G_COL, ROW_TOP + 0.1, w=1.0, h=0.5, group="logo"),
 
     # Backlight key (above F6)
-    KeyDef("Backlight", 0x99, MAIN_X + 7.5, ROW_TOP, w=0.8, h=0.4, group="functions", label="BL"),
+    KeyDef("Backlight", 0x99, MAIN_X + 7.65, ROW_TOP, w=0.7, h=0.7, group="functions", label="BL"),
 
     # === Row 1: Number row ===
     KeyDef("`",     _hid(0x35), MAIN_X, ROW_1, group="keys"),
@@ -223,4 +223,4 @@ ALL_ADDRESSES: list[int] = [k.address for k in G915X_KEYS]
 
 # Layout bounds for rendering
 LAYOUT_WIDTH = NUM_X + 4.0
-LAYOUT_HEIGHT = ROW_5 + 1.75
+LAYOUT_HEIGHT = ROW_5 + 1.0 - ROW_TOP

@@ -7,6 +7,7 @@ Kirigami.FormLayout {
     id: root
     required property var editor
     readonly property var status: editor.status
+    readonly property bool hasBattery: (status.battery_percent ?? -1) >= 0
     readonly property var minutes: [0, 1, 5, 15, 30]
 
     Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: qsTr("Keyboard") }
@@ -18,6 +19,7 @@ Kirigami.FormLayout {
     }
     QQC2.Label {
         Kirigami.FormData.label: qsTr("Battery:")
+        visible: root.hasBattery
         text: (root.status.battery_percent ?? -1) < 0 ? qsTr("Unknown")
             : root.status.battery_charging ? qsTr("%1%, charging").arg(root.status.battery_percent)
             : qsTr("%1%").arg(root.status.battery_percent)
@@ -34,6 +36,7 @@ Kirigami.FormLayout {
         onToggled: root.editor.setOption("off_when_locked", checked)
     }
     QQC2.CheckBox {
+        visible: root.hasBattery
         text: qsTr("Show low battery on the G keys")
         checked: root.editor.options.battery_gkeys
         onToggled: root.editor.setOption("battery_gkeys", checked)

@@ -59,6 +59,7 @@ class G915XBackend:
         self._hidraw_path = None
         self._pkb_index = None  # PerKeyBacklight feature index
         self._battery_index: int | None = None
+        self._battery_checked = False
         self._battery_feature: int | None = None  # which feature ID we resolved
 
     @property
@@ -101,6 +102,7 @@ class G915XBackend:
                 self._fd = None
                 self._pkb_index = None
                 self._battery_index = None
+                self._battery_checked = False
                 self._battery_feature = None
 
     def _find_hidraw_device(self) -> str | None:
@@ -328,7 +330,8 @@ class G915XBackend:
         if self._fd is None:
             return None
 
-        if self._battery_index is None:
+        if self._battery_index is None and not self._battery_checked:
+            self._battery_checked = True
             for feature_id in (FEATURE_UNIFIED_BATTERY, FEATURE_BATTERY_LEGACY):
                 idx = self._get_feature_index(feature_id)
                 if idx is not None:
