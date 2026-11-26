@@ -12,10 +12,9 @@ from PySide6.QtGui import QIcon
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtWidgets import QApplication
 
+from . import APP_ID
 from .editor import Editor
 from .logging_setup import configure as configure_logging
-
-APP_ID = "io.github.joshman1019.g915x_rgb"
 
 
 def build(app: QApplication) -> tuple[QQmlApplicationEngine, Editor]:
