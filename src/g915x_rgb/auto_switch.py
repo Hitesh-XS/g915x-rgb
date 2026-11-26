@@ -32,6 +32,7 @@ from .profile import RULES_PATH
 logger = logging.getLogger("g915x.auto_switch")
 
 DEFAULT_TRANSITION = "fade"
+CATCH_ALL = (".*", "^.*$", "*", ".+")
 
 ACTIVE_WINDOW_HANDLER = Callable[[str, str], None]
 
@@ -95,6 +96,7 @@ class AutoSwitchRules:
     enabled: bool = False
     transition: str = DEFAULT_TRANSITION
     rules: list[Rule] = field(default_factory=list)
+    fallback: str | None = None         # profile for windows no rule matches
 
     def match(self, win_class: str, title: str) -> Rule | None:
         for rule in self.rules:
@@ -107,14 +109,22 @@ class AutoSwitchRules:
             "enabled": self.enabled,
             "transition": self.transition,
             "rules": [r.to_dict() for r in self.rules],
+            "fallback": self.fallback,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "AutoSwitchRules":
+        rules = [Rule.from_dict(r) for r in d.get("rules", [])]
+        fallback = d.get("fallback") or None
+        if "fallback" not in d and rules and rules[-1].title_contains is None \
+                and rules[-1].class_regex in CATCH_ALL:
+            # Older files ended with a catch-all rule instead.
+            fallback = rules.pop().profile
         return cls(
             enabled=bool(d.get("enabled", False)),
             transition=d.get("transition", DEFAULT_TRANSITION),
-            rules=[Rule.from_dict(r) for r in d.get("rules", [])],
+            rules=rules,
+            fallback=fallback,
         )
 
     def save(self, path: Path = RULES_PATH) -> None:

@@ -77,9 +77,12 @@ def test_blend_spans_the_selection_and_resets(editor):
 
 def test_rename_save_and_delete(editor):
     editor.addRule("konsole", "One")
+    editor.setFallback("One")
     editor.renameProfile("Renamed")
     assert editor.save()
     assert editor._rules.rules[0].profile == "Renamed"
+    assert editor._rules.fallback == "Renamed"
+    assert editor.rules["fallback"] == "Renamed"
     assert {p.name for p in load_all_profiles()} == {"Renamed", "Two"}
     editor.deleteProfile()
     assert [p.name for p in load_all_profiles()] == ["Two"]

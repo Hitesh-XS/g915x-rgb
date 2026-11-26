@@ -404,6 +404,8 @@ class Controller:
         rule = self.rules.match(win_class, title)
         if rule is not None:
             target, transition = rule.profile, rule.transition or self.rules.transition
+        elif self.rules.fallback and self.find_profile(self.rules.fallback):
+            target, transition = self.rules.fallback, self.rules.transition
         elif self._chosen is not None:
             target, transition = self._chosen, self.rules.transition
         else:

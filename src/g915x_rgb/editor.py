@@ -194,10 +194,13 @@ class Editor(QObject):
         old = (self._saved.get(id(p)) or {}).get("name")
         try:
             p.save()
-            if old and old != p.name and any(r.profile == old for r in self._rules.rules):
+            if old and old != p.name and (self._rules.fallback == old
+                                          or any(r.profile == old for r in self._rules.rules)):
                 for r in self._rules.rules:
                     if r.profile == old:
                         r.profile = p.name
+                if self._rules.fallback == old:
+                    self._rules.fallback = p.name
                 self._store_rules()
         except OSError as e:
             self.message.emit(f"Could not save: {e.strerror or e}")
@@ -447,13 +450,14 @@ class Editor(QObject):
     @Slot(str, str)
     def addRule(self, pattern: str, profile: str) -> None:
         if pattern.strip() and profile:
-            rule = Rule(profile=profile, class_regex=pattern.strip())
-            # Keep a catch-all last, since the first match wins.
-            at = len(self._rules.rules)
-            if at and self._rules.rules[-1].class_regex == ".*":
-                at -= 1
-            self._rules.rules.insert(at, rule)
+            self._rules.rules.append(Rule(profile=profile, class_regex=pattern.strip()))
             self._store_rules()
+
+    @Slot(str)
+    def setFallback(self, profile: str) -> None:
+        """The profile for windows no rule matches; empty keeps the chosen one."""
+        self._rules.fallback = profile or None
+        self._store_rules()
 
     @Slot(int, str, str)
     def updateRule(self, index: int, field: str, value: str) -> None:
@@ -532,7 +536,7 @@ class Editor(QObject):
         return {"count": len(chosen), "color": _css(color)}
 
     def _get_rules(self):
-        return {"enabled": self._rules.enabled, "items": [
+        return {"enabled": self._rules.enabled, "fallback": self._rules.fallback or "", "items": [
             {"pattern": r.class_regex or "", "profile": r.profile,
              "transition": r.transition or self._rules.transition}
             for r in self._rules.rules]}
