@@ -168,6 +168,7 @@ class Editor(QObject):
         p = self._p
         p.name, p.group_colors, p.key_colors = new.name, new.group_colors, new.key_colors
         p.startup, p.ambient, p.reactive = new.startup, new.ambient, new.reactive
+        p.gkey_actions = new.gkey_actions
         self._last_edit = ("", 0.0)
         self._edited()
 
@@ -370,6 +371,31 @@ class Editor(QObject):
         setattr(target, field, value)
         self._edited()
 
+    @Slot(int, str, str)
+    def setGKeyAction(self, address: int, action_type: str, target: str) -> None:
+        if address not in range(0xB4, 0xBD):
+            return
+
+        if action_type == "":
+            action = None
+        elif action_type == "switch_profile":
+            target = target.strip()
+            if not target or target not in {p.name for p in self._profiles}:
+                return
+            action = {"type": action_type, "target": target}
+        else:
+            return
+
+        if self._p.gkey_actions.get(address) == action:
+            return
+
+        self._begin(f"gkey:{address}")
+        if action is None:
+            self._p.gkey_actions.pop(address, None)
+        else:
+            self._p.gkey_actions[address] = action
+        self._edited()
+
     @Slot(str)
     def setPage(self, page: str) -> None:
         self._page = page
@@ -524,6 +550,15 @@ class Editor(QObject):
             "ambient": anim(p.ambient), "startup": anim(p.startup),
             "reactive": {"effect": p.reactive.effect, "color": _css(p.reactive.color),
                          "intensity": p.reactive.intensity},
+            "gkeys": [
+                {
+                    "address": address,
+                    "name": f"G{address - 0xB3}",
+                    "type": p.gkey_actions.get(address, {}).get("type", ""),
+                    "target": p.gkey_actions.get(address, {}).get("target", ""),
+                }
+                for address in range(0xB4, 0xBD)
+            ],
             "groups": [{"id": g, "label": label, "count": len(KEY_GROUPS[g]),
                         "color": _css(p.group_colors.get(g, BLACK))}
                        for g, label in GROUP_LABELS.items()],

@@ -44,7 +44,10 @@ def test_v2_round_trip_preserves_all_fields():
     )
     p.group_colors["keys"] = (200, 200, 200)
     p.key_colors[0x10] = (50, 60, 70)
-
+    p.gkey_actions[0xB4] = {
+        "type": "switch_profile",
+        "target": "Gaming",
+    }
     p2 = Profile.from_dict(p.to_dict())
     assert p2.name == "New"
     assert p2.startup.name == "comet"
@@ -57,6 +60,10 @@ def test_v2_round_trip_preserves_all_fields():
     assert abs(p2.reactive.intensity - 1.2) < 1e-9
     assert p2.group_colors["keys"] == (200, 200, 200)
     assert p2.key_colors[0x10] == (50, 60, 70)
+    assert p2.gkey_actions[0xB4] == {
+        "type": "switch_profile",
+        "target": "Gaming",
+    }
 
 
 def test_legacy_property_setters_still_work():
@@ -73,13 +80,19 @@ def test_duplicate_profile_is_independent():
     a = Profile(name="A")
     a.group_colors["keys"] = (1, 2, 3)
     a.key_colors[0x40] = (10, 11, 12)
+    a.gkey_actions[0xB4] = {
+        "type": "switch_profile",
+        "target": "Gaming",
+    }
     b = duplicate_profile(a, "B")
     assert b.name == "B"
     b.group_colors["keys"] = (255, 255, 255)
     b.key_colors[0x40] = (0, 0, 0)
+    b.gkey_actions[0xB4]["target"] = "Work"
     # Mutations on the copy must not bleed back.
     assert a.group_colors["keys"] == (1, 2, 3)
     assert a.key_colors[0x40] == (10, 11, 12)
+    assert a.gkey_actions[0xB4]["target"] == "Gaming"
 
 
 def test_atomic_save_and_rename_unlinks_old_file(tmp_path, monkeypatch):
