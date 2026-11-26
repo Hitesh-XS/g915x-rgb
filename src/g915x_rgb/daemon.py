@@ -22,6 +22,7 @@ import dbus.mainloop.glib
 import dbus.service
 from gi.repository import GLib
 
+from . import APP_ID
 from .animation import ANIMATIONS, AnimationConfig
 from .auto_switch import AutoSwitchRules, KWinSource, detect_compositor, find_kwin_script
 from .backend import G915XBackend, KeyboardNotFoundError, device_present
@@ -391,6 +392,9 @@ class Controller:
         self.emit_status()
 
     def window_changed(self, win_class: str, title: str) -> None:
+        if win_class == APP_ID:
+            # The editor and its dialogs: keep showing the profile being edited.
+            return
         if (win_class, title) == self._last_window:
             return
         self._last_window = (win_class, title)

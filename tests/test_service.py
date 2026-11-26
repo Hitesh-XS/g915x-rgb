@@ -282,3 +282,16 @@ def test_catch_all_rule_becomes_the_fallback():
     assert rules.fallback == "Red" and len(rules.rules) == 1
     again = daemon.AutoSwitchRules.from_dict(rules.to_dict())
     assert again.fallback == "Red" and len(again.rules) == 1
+
+
+def test_own_windows_do_not_switch(ctl):
+    c, _ = ctl
+    c.rules = daemon.AutoSwitchRules.from_dict(
+        {"enabled": True, "fallback": "Red",
+         "rules": [{"profile": "Blue", "class_regex": "konsole"}]})
+    c.window_changed(daemon.APP_ID, "Red — G915 X Lighting")
+    c.set_profile("Blue")          # picked in the editor
+    c.window_changed(daemon.APP_ID, "Choose a color")
+    assert c.status.current_profile == "Blue"
+    c.window_changed("firefox", "page")
+    assert c.status.current_profile == "Red"
