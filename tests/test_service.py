@@ -221,3 +221,33 @@ def test_rules_switch_profiles_but_not_during_a_preview(ctl):
     c.stop_preview()
     c.window_changed("steam", "")
     assert c.status.current_profile == "Blue"
+
+
+def test_rules_return_to_the_chosen_profile(ctl):
+    c, _ = ctl
+    c.rules = daemon.AutoSwitchRules.from_dict(
+        {"enabled": True, "rules": [{"profile": "Blue", "class_regex": "konsole"}]})
+    c.window_changed("org.kde.konsole", "shell")
+    assert c.status.current_profile == "Blue"
+    assert config.get_last_profile() == "Red"
+    c.window_changed("firefox", "page")
+    assert c.status.current_profile == "Red"
+
+
+def test_rule_checked_again_after_a_preview(ctl):
+    c, _ = ctl
+    c.rules = daemon.AutoSwitchRules.from_dict(
+        {"enabled": True, "rules": [{"profile": "Blue", "class_regex": "konsole"}]})
+    c.preview(json.dumps(solid("tmp", (1, 2, 3)).to_dict()))
+    c.window_changed("org.kde.konsole", "shell")
+    assert c.status.current_profile == "Red"
+    c.stop_preview()
+    assert c.status.current_profile == "Blue"
+
+
+@pytest.mark.parametrize("pattern", ["*Konsole*", "konsole", "^org\\.kde\\.konsole$", "org.kde.*"])
+def test_rule_patterns(pattern):
+    rule = daemon.AutoSwitchRules.from_dict(
+        {"rules": [{"profile": "x", "class_regex": pattern}]}).rules[0]
+    assert rule.matches("org.kde.konsole", "")
+    assert not rule.matches("firefox", "")

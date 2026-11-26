@@ -99,6 +99,7 @@ class Controller:
         self._reader: KeyEventReader | None = None
         self._window_source: KWinSource | None = None
         self._last_window = ("", "")
+        self._chosen: str | None = None         # picked by the person, not a rule
         self._idle_watch: tuple[IdleWatcher, int] | None = None
 
     # ---------- profiles ----------
@@ -123,10 +124,13 @@ class Controller:
         self._previewing = False
         self._current = profile
         self.status.current_profile = profile.name
-        try:
-            set_last_profile(profile.name)
-        except OSError as e:
-            logger.warning("could not remember the profile: %s", e)
+        if not reason.startswith("window:"):
+            # Rules switch away from this profile and back to it again.
+            self._chosen = profile.name
+            try:
+                set_last_profile(profile.name)
+            except OSError as e:
+                logger.warning("could not remember the profile: %s", e)
         self._show(profile, transition=transition,
                    startup=reason in ("boot", "reconnect"))
         self.on_switched(profile.name, reason)
@@ -149,6 +153,7 @@ class Controller:
             self._previewing = False
             if self._current is not None:
                 self._show(self._current)
+            self._apply_rules()
 
     def _show(self, profile: Profile, *, transition: str = "", startup: bool = False) -> None:
         self._generation += 1
@@ -225,7 +230,8 @@ class Controller:
         logger.info("keyboard connected")
         self._renderer.start()
         self.poll_battery()
-        target = self._current or self.find_profile(get_last_profile() or "")
+        target = (self.find_profile(self._chosen or "") or self._current
+                  or self.find_profile(get_last_profile() or ""))
         if target is None:
             if not self._profiles:
                 profile = create_default_profile()
@@ -234,6 +240,7 @@ class Controller:
             target = self._profiles[0]
         self._current = target
         self.set_profile(target.name, reason="reconnect")
+        self._apply_rules()
         return True
 
     def disconnect(self) -> None:
@@ -384,14 +391,25 @@ class Controller:
         self.emit_status()
 
     def window_changed(self, win_class: str, title: str) -> None:
-        if not self.rules.enabled or self._previewing or (win_class, title) == self._last_window:
+        if (win_class, title) == self._last_window:
             return
         self._last_window = (win_class, title)
-        rule = self.rules.match(win_class, title)
-        if rule is None or (self._current and self._current.name == rule.profile):
+        self._apply_rules()
+
+    def _apply_rules(self) -> None:
+        """Show the profile for the active window, or the chosen one when no rule matches."""
+        win_class, title = self._last_window
+        if not self.rules.enabled or self._previewing or not (win_class or title):
             return
-        self.set_profile(rule.profile, rule.transition or self.rules.transition,
-                         reason=f"window:{win_class}")
+        rule = self.rules.match(win_class, title)
+        if rule is not None:
+            target, transition = rule.profile, rule.transition or self.rules.transition
+        elif self._chosen is not None:
+            target, transition = self._chosen, self.rules.transition
+        else:
+            return
+        if self._current is None or self._current.name != target:
+            self.set_profile(target, transition, reason=f"window:{win_class}")
 
     # ---------- lifecycle ----------
     def emit_status(self) -> None:
@@ -465,6 +483,20 @@ class Service(dbus.service.Object):
     @dbus.service.method(BUS_NAME, in_signature="ss", out_signature="")
     def OnActiveWindowChanged(self, win_class, title):
         self._c.window_changed(str(win_class), str(title))
+
+    @dbus.service.method(BUS_NAME, in_signature="", out_signature="s",
+                         async_callbacks=("reply", "error"))
+    def PickWindow(self, reply, error):
+        """Let the person click a window and return its application class."""
+        try:
+            kwin = self._bus.get_object("org.kde.KWin", "/KWin")
+        except dbus.DBusException as e:
+            error(e)
+            return
+        kwin.queryWindowInfo(
+            dbus_interface="org.kde.KWin", timeout=120,
+            reply_handler=lambda info: reply(str(info.get("resourceClass", ""))),
+            error_handler=error)
 
     @dbus.service.method(BUS_NAME, in_signature="", out_signature="")
     def Quit(self):

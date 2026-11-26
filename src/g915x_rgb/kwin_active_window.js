@@ -32,8 +32,9 @@ function send() {
     );
 }
 
-if (typeof workspace.activeWindowChanged !== "undefined") {
-    workspace.activeWindowChanged.connect(send);
+// Plasma 6 names the signal windowActivated; Plasma 5 clientActivated.
+if (typeof workspace.windowActivated !== "undefined") {
+    workspace.windowActivated.connect(send);
 } else if (typeof workspace.clientActivated !== "undefined") {
     workspace.clientActivated.connect(send);
 }

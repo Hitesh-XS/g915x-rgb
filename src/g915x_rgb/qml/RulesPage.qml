@@ -84,7 +84,7 @@ ColumnLayout {
         Layout.fillWidth: true
         wrapMode: Text.Wrap
         color: Kirigami.Theme.disabledTextColor
-        text: qsTr("The first matching rule wins. Add .* last to cover everything else.")
+        text: qsTr("The first matching rule wins. Other applications use the profile you chose. Patterns can be names, wildcards such as *konsole*, or regular expressions.")
     }
     Connections {
         target: root.editor

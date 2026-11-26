@@ -16,6 +16,7 @@ without changes elsewhere.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 import re
@@ -54,10 +55,7 @@ class Rule:
 
     def matches(self, win_class: str, title: str) -> bool:
         if self.class_regex is not None:
-            try:
-                if not re.search(self.class_regex, win_class, re.IGNORECASE):
-                    return False
-            except re.error:
+            if not class_pattern(self.class_regex).search(win_class):
                 return False
         if self.title_contains is not None:
             if self.title_contains.lower() not in title.lower():
@@ -82,6 +80,14 @@ class Rule:
             title_contains=d.get("title_contains"),
             transition=d.get("transition"),
         )
+
+
+def class_pattern(text: str) -> re.Pattern:
+    """A regular expression, or a wildcard pattern such as ``*konsole*``."""
+    try:
+        return re.compile(text, re.IGNORECASE)
+    except re.error:
+        return re.compile(fnmatch.translate(text), re.IGNORECASE)
 
 
 @dataclass
