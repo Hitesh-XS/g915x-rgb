@@ -251,3 +251,34 @@ def test_rule_patterns(pattern):
         {"rules": [{"profile": "x", "class_regex": pattern}]}).rules[0]
     assert rule.matches("org.kde.konsole", "")
     assert not rule.matches("firefox", "")
+
+
+def test_fallback_covers_unmatched_windows(ctl):
+    c, _ = ctl
+    c.rules = daemon.AutoSwitchRules.from_dict(
+        {"enabled": True, "fallback": "Red",
+         "rules": [{"profile": "Blue", "class_regex": "konsole"}]})
+    c.set_profile("Blue")          # chosen in the editor, e.g. to edit it
+    c.window_changed("firefox", "page")
+    assert c.status.current_profile == "Red"
+    c.window_changed("org.kde.konsole", "shell")
+    assert c.status.current_profile == "Blue"
+
+
+def test_missing_fallback_keeps_the_chosen_profile(ctl):
+    c, _ = ctl
+    c.rules = daemon.AutoSwitchRules.from_dict(
+        {"enabled": True, "fallback": "Gone",
+         "rules": [{"profile": "Blue", "class_regex": "konsole"}]})
+    c.window_changed("org.kde.konsole", "shell")
+    c.window_changed("firefox", "page")
+    assert c.status.current_profile == "Red"
+
+
+def test_catch_all_rule_becomes_the_fallback():
+    old = {"rules": [{"profile": "Blue", "class_regex": "konsole"},
+                     {"profile": "Red", "class_regex": ".*"}]}
+    rules = daemon.AutoSwitchRules.from_dict(old)
+    assert rules.fallback == "Red" and len(rules.rules) == 1
+    again = daemon.AutoSwitchRules.from_dict(rules.to_dict())
+    assert again.fallback == "Red" and len(again.rules) == 1

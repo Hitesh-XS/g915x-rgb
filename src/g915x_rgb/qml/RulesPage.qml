@@ -80,11 +80,23 @@ ColumnLayout {
             }
         }
     }
+    RowLayout {
+        QQC2.Label { text: qsTr("Default fallback profile:") }
+        QQC2.ComboBox {
+            id: fallback
+            Layout.fillWidth: true
+            // The first entry keeps whichever profile was chosen last.
+            model: [qsTr("None: keep the last chosen profile")].concat(root.names)
+            currentIndex: root.names.indexOf(root.editor.rules.fallback) + 1
+            Accessible.name: qsTr("Default fallback profile")
+            onActivated: index => root.editor.setFallback(index > 0 ? currentText : "")
+        }
+    }
     QQC2.Label {
         Layout.fillWidth: true
         wrapMode: Text.Wrap
         color: Kirigami.Theme.disabledTextColor
-        text: qsTr("The first matching rule wins. Other applications use the profile you chose. Patterns can be names, wildcards such as *konsole*, or regular expressions.")
+        text: qsTr("The first matching rule wins. Applications no rule matches use the default fallback profile. Patterns can be names, wildcards such as *konsole*, or regular expressions.")
     }
     Connections {
         target: root.editor

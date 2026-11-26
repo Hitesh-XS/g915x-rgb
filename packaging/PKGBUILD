@@ -1,6 +1,6 @@
 # Maintainer: Joshua Santiago <joshman1019 at gmail dot com>
 pkgname=g915x-rgb-git
-pkgver=r32.e645abe
+pkgver=r38.52836d6
 pkgrel=1
 pkgdesc="Lighting control for the Logitech G915 X keyboard"
 arch=('any')

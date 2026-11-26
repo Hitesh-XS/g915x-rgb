@@ -28,3 +28,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 g915x_rgb = ["qml/*.qml", "*.js"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
