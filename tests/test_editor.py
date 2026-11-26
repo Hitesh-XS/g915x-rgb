@@ -68,17 +68,15 @@ def test_fill_undo_redo(editor):
 def test_gkey_action_undo_redo(editor):
     action = {"type": "switch_profile", "target": "Two"}
 
-    editor._begin("gkey:180")
-    editor._p.gkey_actions[180] = action
-    editor._edited()
+    editor.setGKeyAction(180, "switch_profile", "Two")
 
-    assert editor._p.gkey_actions[180] == action
+    assert editor._gkey_actions[180] == action
 
     editor.undo()
-    assert 180 not in editor._p.gkey_actions
+    assert 180 not in editor._gkey_actions
 
     editor.redo()
-    assert editor._p.gkey_actions[180] == action
+    assert editor._gkey_actions[180] == action
 
 
 def test_blend_spans_the_selection_and_resets(editor):

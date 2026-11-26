@@ -41,7 +41,9 @@ Kirigami.ScrollablePage {
                     ]
                     textRole: "text"
                     valueRole: "value"
-                    currentIndex: Math.max(0, indexOfValue(modelData.type))
+                    Component.onCompleted: {
+                        currentIndex = Math.max(0, indexOfValue(modelData.type));
+                    }
 
                     onActivated: {
                         const target = targetBox.currentText;

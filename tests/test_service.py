@@ -161,7 +161,7 @@ def test_gkey_switches_profile(ctl):
     c, _ = ctl
     g1 = KEY_GROUPS["gkeys"][0].address
 
-    c._shown.gkey_actions[g1] = {
+    c._gkey_actions[g1] = {
         "type": "switch_profile",
         "target": "Blue",
     }
