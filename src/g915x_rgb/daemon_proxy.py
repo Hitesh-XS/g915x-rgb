@@ -78,9 +78,8 @@ class DaemonProxy(QObject):
 
     def pick_window(self) -> None:
         def done(reply) -> None:
-            info = reply[0] if reply and isinstance(reply[0], dict) else {}
-            if info.get("resourceClass"):
-                self.windowPicked.emit(str(info["resourceClass"]))
+            if reply and reply[0]:
+                self.windowPicked.emit(str(reply[0]))
+        # The service asks KWin: PySide6 cannot unpack KWin's a{sv} reply.
         # Waits for the person to click a window.
-        self._call("queryWindowInfo", done=done, timeout=120_000,
-                   target=("org.kde.KWin", "/KWin", "org.kde.KWin"))
+        self._call("PickWindow", done=done, timeout=120_000)
