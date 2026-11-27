@@ -109,7 +109,7 @@ class Controller:
     def reload_profiles(self) -> list[dict]:
         result = load_all_profiles_with_errors()
         self._profiles = result.profiles
-        self._gkey_actions = load_gkey_actions(self._profiles)
+        self._gkey_actions = load_gkey_actions()
 
         for path, msg in result.errors:
             logger.warning("could not load profile %s: %s", path, msg)

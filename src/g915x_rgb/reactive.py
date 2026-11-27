@@ -71,8 +71,7 @@ _EVDEV_TO_NAME: dict[int, str] = {
     79: "Num1", 80: "Num2", 81: "Num3",
     82: "Num0", 83: "Num.",
     87: "F11", 88: "F12",
-    # Assumed G1-G9 mapping to Linux F13-F21 evdev codes.
-    # The G915 X hardware has not yet been tested to confirm these events.
+    # Confirmed G1-G9 mapping to Linux F13-F21 evdev codes.
     183: "G1", 184: "G2", 185: "G3",
     186: "G4", 187: "G5", 188: "G6",
     189: "G7", 190: "G8", 191: "G9",

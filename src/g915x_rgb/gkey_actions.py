@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from typing import Iterable
 
 from .config import CONFIG_DIR, write_json
 
@@ -23,48 +21,41 @@ def _valid_action(action):
     return isinstance(target, str) and bool(target.strip())
 
 
-def load_gkey_actions(profiles: Iterable = ()) -> dict[int, dict]:
-    """Load shared actions, migrating legacy profile assignments once."""
+def load_gkey_actions() -> dict[int, dict]:
+    """Load actions from the shared Default set."""
     try:
         data = json.loads(GKEYS_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        data = None
+        return {}
 
-    if isinstance(data, dict) and isinstance(data.get("actions"), dict):
-        actions = {}
-        for address, action in data["actions"].items():
-            try:
-                address = int(address)
-            except (TypeError, ValueError):
-                continue
+    sets = data.get("sets") if isinstance(data, dict) else None
+    actions = sets.get("Default") if isinstance(sets, dict) else None
+    if not isinstance(actions, dict):
+        return {}
 
-            if address in GKEY_ADDRESSES and _valid_action(action):
-                actions[address] = dict(action)
+    result = {}
+    for address, action in actions.items():
+        try:
+            address = int(address)
+        except (TypeError, ValueError):
+            continue
 
-        return actions
+        if address in GKEY_ADDRESSES and _valid_action(action):
+            result[address] = dict(action)
 
-    # Migrate old per-profile assignments only when no shared file exists.
-    actions = {}
-    for profile in profiles:
-        for address, action in profile.gkey_actions.items():
-            if address in GKEY_ADDRESSES and _valid_action(action):
-                actions.setdefault(address, dict(action))
-
-    if actions:
-        save_gkey_actions(actions)
-
-    return actions
+    return result
 
 
 def save_gkey_actions(actions: dict[int, dict]) -> None:
-    """Atomically save the shared G-key action map."""
+    """Save shared actions in the Default set."""
     data = {
-        "version": 1,
-        "actions": {
-            str(address): dict(action)
-            for address, action in actions.items()
-            if address in GKEY_ADDRESSES and _valid_action(action)
-        },
+        "sets": {
+            "Default": {
+                str(address): dict(action)
+                for address, action in actions.items()
+                if address in GKEY_ADDRESSES and _valid_action(action)
+            }
+        }
     }
     write_json(GKEYS_PATH, data)
 

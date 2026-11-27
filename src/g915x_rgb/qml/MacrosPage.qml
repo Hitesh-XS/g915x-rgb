@@ -1,9 +1,11 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 
 Kirigami.ScrollablePage {
+    id: root
     required property var editor
 
     title: qsTr("G-key macros")
@@ -26,6 +28,14 @@ Kirigami.ScrollablePage {
 
                 Layout.fillWidth: true
                 spacing: Kirigami.Units.largeSpacing
+
+                        Kirigami.InlineMessage {
+                            Layout.fillWidth: true
+                            visible: root.editor.status.typing_available === false
+                            type: Kirigami.MessageType.Warning
+                            text: qsTr("The service cannot read this keyboard's key presses, so
+        typing effects will not appear. See /usr/share/doc/g915x-rgb for how to allow it.")
+                        }
 
                 QQC2.Label {
                     Layout.preferredWidth: 50

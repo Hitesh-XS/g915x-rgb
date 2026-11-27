@@ -99,8 +99,6 @@ class Editor(QObject):
         self._index = 0
         self._undo: dict[int, list[dict]] = {}
         self._redo: dict[int, list[dict]] = {}
-        self._gkey_undo: list[dict[int, dict]] = []
-        self._gkey_redo: list[dict[int, dict]] = []
         self._saved: dict[int, dict] = {}
         self._last_edit = ("", 0.0)
         self._page = "colors"
@@ -137,7 +135,7 @@ class Editor(QObject):
             profile = create_default_profile()
             profile.save()
             self._profiles = [profile]
-        self._gkey_actions = load_gkey_actions(self._profiles)
+        self._gkey_actions = load_gkey_actions()
         for p in self._profiles:
             self._saved[id(p)] = p.to_dict()
         last = get_last_profile()
@@ -146,6 +144,16 @@ class Editor(QObject):
             names = ", ".join(path.name for path, _ in result.errors)
             QTimer.singleShot(0, lambda: self.message.emit(f"Could not read: {names}"))
         self._refresh()
+
+    def _save_gkey_actions(self) -> bool:
+        try:
+            save_gkey_actions(self._gkey_actions)
+        except OSError as e:
+            self.message.emit(f"Could not save G-key actions: {e}")
+            return False
+
+        self._daemon.reload_gkey_actions()
+        return True
 
     @property
     def _p(self) -> Profile:
@@ -156,11 +164,6 @@ class Editor(QObject):
         self.profileChanged.emit()
         self._render()
 
-    def _copy_gkey_actions(self) -> dict[int, dict]:
-        return {
-            address: dict(action)
-            for address, action in self._gkey_actions.items()
-        }
 
     # ---------- editing ----------
     def _begin(self, what: str) -> None:
@@ -188,32 +191,6 @@ class Editor(QObject):
 
     @Slot()
     def undo(self) -> None:
-        if self._gkey_undo:
-            current = self._copy_gkey_actions()
-            previous = self._gkey_undo.pop()
-
-            self._gkey_redo.append(current)
-            self._gkey_actions = previous
-
-            try:
-                save_gkey_actions(self._gkey_actions)
-            except OSError as e:
-                self._gkey_actions = current
-                self._gkey_undo.append(previous)
-                self._gkey_redo.pop()
-                self.message.emit(f"Could not save G-key actions: {e}")
-                return
-
-            reload_actions = getattr(
-                self._daemon, "reload_gkey_actions", None
-            )
-            if reload_actions is not None:
-                reload_actions()
-
-            self._last_edit = ("", 0.0)
-            self._refresh()
-            return
-
         stack = self._undo.get(id(self._p))
         if stack:
             self._redo.setdefault(id(self._p), []).append(self._p.to_dict())
@@ -221,33 +198,6 @@ class Editor(QObject):
 
     @Slot()
     def redo(self) -> None:
-        if self._gkey_redo:
-            current = self._copy_gkey_actions()
-            next_actions = self._gkey_redo.pop()
-
-            self._gkey_undo.append(current)
-            del self._gkey_undo[:-MAX_UNDO]
-            self._gkey_actions = next_actions
-
-            try:
-                save_gkey_actions(self._gkey_actions)
-            except OSError as e:
-                self._gkey_actions = current
-                self._gkey_undo.pop()
-                self._gkey_redo.append(next_actions)
-                self.message.emit(f"Could not save G-key actions: {e}")
-                return
-
-            reload_actions = getattr(
-                self._daemon, "reload_gkey_actions", None
-            )
-            if reload_actions is not None:
-                reload_actions()
-
-            self._last_edit = ("", 0.0)
-            self._refresh()
-            return
-
         stack = self._redo.get(id(self._p))
         if stack:
             self._undo.setdefault(id(self._p), []).append(self._p.to_dict())
@@ -260,13 +210,17 @@ class Editor(QObject):
     def save(self) -> bool:
         p = self._p
         old = (self._saved.get(id(p)) or {}).get("name")
-        gkey_actions_changed = False
         try:
             p.save()
             if old and old != p.name:
+                old_gkey_actions = {
+                    address: dict(action)
+                    for address, action in self._gkey_actions.items()
+                }
                 if rename_profile_target(self._gkey_actions, old, p.name):
-                    save_gkey_actions(self._gkey_actions)
-                    gkey_actions_changed = True
+                    if not self._save_gkey_actions():
+                        self._gkey_actions = old_gkey_actions
+                        return False
 
             if old and old != p.name and (self._rules.fallback == old
                                           or any(r.profile == old for r in self._rules.rules)):
@@ -279,12 +233,7 @@ class Editor(QObject):
         except OSError as e:
             self.message.emit(f"Could not save: {e.strerror or e}")
             return False
-        if gkey_actions_changed:
-            reload_actions = getattr(
-                self._daemon, "reload_gkey_actions", None
-            )
-            if reload_actions is not None:
-                reload_actions()
+
         self._saved[id(p)] = p.to_dict()
         self._push.stop()
         self._daemon.apply(p.name)
@@ -471,28 +420,17 @@ class Editor(QObject):
 
         previous = self._gkey_actions.get(address)
 
-        self._gkey_undo.append(self._copy_gkey_actions())
-        del self._gkey_undo[:-MAX_UNDO]
-        self._gkey_redo.clear()
-
         if action is None:
             self._gkey_actions.pop(address, None)
         else:
             self._gkey_actions[address] = action
 
-        try:
-            save_gkey_actions(self._gkey_actions)
-        except OSError as e:
+        if not self._save_gkey_actions():
             if previous is None:
                 self._gkey_actions.pop(address, None)
             else:
                 self._gkey_actions[address] = previous
-            self.message.emit(f"Could not save G-key actions: {e}")
             return
-
-        reload_actions = getattr(self._daemon, "reload_gkey_actions", None)
-        if reload_actions is not None:
-            reload_actions()
 
         self._refresh()
 
@@ -647,8 +585,8 @@ class Editor(QObject):
         p = self._p
         return {
             "name": p.name, "index": self._index, "dirty": self._is_dirty(p),
-            "canUndo": bool(self._gkey_undo or self._undo.get(id(p))),
-            "canRedo": bool(self._gkey_redo or self._redo.get(id(p))),
+            "canUndo": bool(self._undo.get(id(p))),
+            "canRedo": bool(self._redo.get(id(p))),
             "ambient": anim(p.ambient), "startup": anim(p.startup),
             "reactive": {"effect": p.reactive.effect, "color": _css(p.reactive.color),
                          "intensity": p.reactive.intensity},

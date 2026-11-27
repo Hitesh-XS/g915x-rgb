@@ -120,7 +120,7 @@ Kirigami.ApplicationWindow {
                     QQC2.TabButton { text: qsTr("Colors"); icon.name: "color-management" }
                     QQC2.TabButton { text: qsTr("Effects"); icon.name: "media-playback-start" }
                     QQC2.TabButton { text: qsTr("Typing"); icon.name: "input-keyboard" }
-                    QQC2.TabButton { text: qsTr("Macros"); icon.name: "input-keyboard" }
+                    QQC2.TabButton { text: qsTr("Macros"); icon.name: "configure-shortcuts" }
                     QQC2.TabButton { text: qsTr("App rules"); icon.name: "preferences-system-windows" }
                     QQC2.TabButton { text: qsTr("Device"); icon.name: "configure" }
                 }

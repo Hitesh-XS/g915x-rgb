@@ -98,7 +98,6 @@ class Profile:
     startup: AnimationProfile = field(default_factory=AnimationProfile)
     ambient: AnimationProfile = field(default_factory=AnimationProfile)
     reactive: ReactiveProfile = field(default_factory=ReactiveProfile)
-    gkey_actions: dict[int, dict[str, Any]] = field(default_factory=dict)
     _saved_path: Path | None = field(default=None, repr=False)
 
     # ----- legacy-compat properties used by older callers -----
@@ -149,10 +148,6 @@ class Profile:
             "startup": self.startup.to_dict(),
             "ambient": self.ambient.to_dict(),
             "reactive": self.reactive.to_dict(),
-            "gkey_actions": {
-                str(address): action
-                for address, action in self.gkey_actions.items()
-            },
             "groups": {
                 g: _rgb_to_hex(c) for g, c in self.group_colors.items()
             },
@@ -178,9 +173,6 @@ class Profile:
             p.ambient = AnimationProfile.from_dict(data["ambient"])
         if "reactive" in data:
             p.reactive = ReactiveProfile.from_dict(data["reactive"])
-        for address, action in data.get("gkey_actions", {}).items():
-            if isinstance(action, dict):
-                p.gkey_actions[int(address)] = dict(action)
         for group, color_hex in data.get("groups", {}).items():
             p.group_colors[group] = _parse_hex(color_hex)
         for addr_str, color_hex in data.get("individual_keys", {}).items():
@@ -330,7 +322,6 @@ def duplicate_profile(p: Profile, new_name: str) -> Profile:
         startup=replace(p.startup),
         ambient=replace(p.ambient),
         reactive=replace(p.reactive),
-        gkey_actions={address: dict(action) for address, action in p.gkey_actions.items()},
     )
 
 
