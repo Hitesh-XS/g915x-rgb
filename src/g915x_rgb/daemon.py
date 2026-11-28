@@ -27,9 +27,9 @@ from .animation import ANIMATIONS, AnimationConfig
 from .auto_switch import AutoSwitchRules, KWinSource, detect_compositor, find_kwin_script
 from .backend import G915XBackend, KeyboardNotFoundError, device_present
 from .config import get_last_profile, get_options, set_last_profile, set_option
+from .gkey_actions import get_profile_switch_target, load_gkey_actions
 from .idle import IdleWatcher
 from .keyboard_layout import ALL_ADDRESSES, KEY_GROUPS
-from .gkey_actions import get_profile_switch_target, load_gkey_actions
 from .logging_setup import configure as configure_logging
 from .profile import (
     AnimationProfile,
@@ -110,10 +110,8 @@ class Controller:
         result = load_all_profiles_with_errors()
         self._profiles = result.profiles
         self._gkey_actions = load_gkey_actions()
-
         for path, msg in result.errors:
             logger.warning("could not load profile %s: %s", path, msg)
-
         self._configure_reactive()
         return [{"path": str(p), "error": m} for p, m in result.errors]
 
@@ -344,39 +342,28 @@ class Controller:
     def _set_idle(self, idle: bool) -> None:
         self._idle = idle
 
+    # ---------- typing effects and G keys ----------
     def _needs_key_reader(self) -> bool:
-        profile = self._shown
-        if profile is None:
-            return False
+        """Key presses are needed for a typing effect or any G-key action."""
+        return self._shown is not None and bool(self._shown.reactive.effect
+                                                 or self._gkey_actions)
 
-        reactive_enabled = bool(profile.reactive.effect)
-        gkey_actions_enabled = bool(self._gkey_actions)
-
-        return reactive_enabled or gkey_actions_enabled
-
-    # ---------- typing effects ----------
     def _configure_reactive(self) -> None:
         cfg = self._shown.reactive if self._shown else None
-
         if cfg is None or not cfg.effect:
             self._reactive = None
             self._renderer.set_reactive_source(None)
+        elif self._reactive is None:
+            self._reactive = ReactiveOverlay(cfg.effect, cfg.color, cfg.intensity)
+            self._renderer.set_reactive_source(self._reactive)
         else:
-            if self._reactive is None:
-                self._reactive = ReactiveOverlay(
-                    cfg.effect, cfg.color, cfg.intensity
-                )
-                self._renderer.set_reactive_source(self._reactive)
-            else:
-                self._reactive.effect = cfg.effect
-                self._reactive.color = cfg.color
-                self._reactive.intensity = cfg.intensity
-
-        if self._needs_key_reader() and self._kb.is_connected:
-            if not (self._reader and self._reader.is_alive()):
-                self._start_reader()
-        else:
+            self._reactive.effect = cfg.effect
+            self._reactive.color = cfg.color
+            self._reactive.intensity = cfg.intensity
+        if not (self._needs_key_reader() and self._kb.is_connected):
             self._stop_reader()
+        elif not (self._reader and self._reader.is_alive()):
+            self._start_reader()
 
     def _start_reader(self) -> None:
         self._stop_reader()
@@ -401,13 +388,13 @@ class Controller:
         overlay = self._reactive
         if overlay is not None:
             overlay.trigger(address)
+        if address in self._gkey_actions:
+            self._defer(self._run_gkey_action, address)
 
-        self._defer(self._handle_key_pressed, address)
-
-    def _handle_key_pressed(self, address: int) -> None:
+    def _run_gkey_action(self, address: int) -> None:
+        """Run a G key's action on the main loop; G keys do nothing while previewing."""
         if self._previewing:
             return
-
         target = get_profile_switch_target(self._gkey_actions, address)
         if target is not None:
             self.set_profile(target, reason="gkey")

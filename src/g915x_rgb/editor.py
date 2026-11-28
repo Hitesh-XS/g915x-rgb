@@ -165,7 +165,6 @@ class Editor(QObject):
         self.profileChanged.emit()
         self._render()
 
-
     # ---------- editing ----------
     def _begin(self, what: str) -> None:
         """Record an undo step; rapid edits of one control share a step."""
@@ -398,9 +397,9 @@ class Editor(QObject):
         setattr(target, field, value)
         self._edited()
 
-
     @Slot(int, str, str)
     def setGKeyAction(self, address: int, action_type: str, target: str) -> None:
+        """Assign a G key's action and save it at once; it is not part of undo."""
         if address not in GKEY_ADDRESSES:
             return
 
@@ -432,7 +431,6 @@ class Editor(QObject):
             return
 
         self._refresh()
-
 
     @Slot(str)
     def setPage(self, page: str) -> None:
@@ -584,12 +582,10 @@ class Editor(QObject):
         p = self._p
         return {
             "name": p.name, "index": self._index, "dirty": self._is_dirty(p),
-            "canUndo": bool(self._undo.get(id(p))),
-            "canRedo": bool(self._redo.get(id(p))),
+            "canUndo": bool(self._undo.get(id(p))), "canRedo": bool(self._redo.get(id(p))),
             "ambient": anim(p.ambient), "startup": anim(p.startup),
             "reactive": {"effect": p.reactive.effect, "color": _css(p.reactive.color),
                          "intensity": p.reactive.intensity},
-
             "gkeys": [
                 {
                     "address": address,
@@ -597,9 +593,8 @@ class Editor(QObject):
                     "type": self._gkey_actions.get(address, {}).get("type", ""),
                     "target": self._gkey_actions.get(address, {}).get("target", ""),
                 }
-                for address in range(0xB4, 0xBD)
+                for address in GKEY_ADDRESSES
             ],
-
             "groups": [{"id": g, "label": label, "count": len(KEY_GROUPS[g]),
                         "color": _css(p.group_colors.get(g, BLACK))}
                        for g, label in GROUP_LABELS.items()],
