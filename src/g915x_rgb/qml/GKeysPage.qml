@@ -85,7 +85,16 @@ ColumnLayout {
     QQC2.Label {
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
-        text: qsTr("To have a G key run a command or script, add it in KDE's shortcut settings: choose Add New, then Command or Script, and press the G key when asked for a shortcut. KDE may show the key under its own name, such as \"Tools\" for G1. That is expected, and the shortcut still works.")
+        textFormat: Text.StyledText
+        text: qsTr("To have a G key open an application or run a command, use KDE's shortcut settings:"
+                   + "<ol>"
+                   + "<li>Click <b>Open KDE shortcuts</b> below.</li>"
+                   + "<li>Click <b>Add New</b> at the top right and choose <b>Command or Script</b>.</li>"
+                   + "<li>Enter the command, such as <i>konsole</i>, and a name, such as <i>Open Konsole</i>. Click <b>Add</b>.</li>"
+                   + "<li>With the new entry selected under <b>Commands</b>, click <b>Add…</b> under <b>Custom shortcuts</b>, then press the G key.</li>"
+                   + "<li>Click <b>Apply</b>.</li>"
+                   + "</ol>"
+                   + "KDE may show the G key under its own name, such as \"Tools\" for G1. That is expected, and the shortcut still works.")
     }
 
     QQC2.Button {
