@@ -15,13 +15,14 @@ from .animation import ANIMATIONS, _lerp, _scale_frame
 from .auto_switch import AutoSwitchRules, Rule
 from .config import get_last_profile, get_options
 from .daemon_proxy import DaemonProxy
-from .keyboard_layout import (
-    ALL_ADDRESSES, G915X_KEYS, KEY_BY_ADDRESS, KEY_GROUPS, LAYOUT_HEIGHT, LAYOUT_WIDTH,
-)
 from .gkey_actions import (
+    GKEY_ADDRESSES,
     load_gkey_actions,
     rename_profile_target,
     save_gkey_actions,
+)
+from .keyboard_layout import (
+    ALL_ADDRESSES, G915X_KEYS, KEY_BY_ADDRESS, KEY_GROUPS, LAYOUT_HEIGHT, LAYOUT_WIDTH,
 )
 from .profile import (
     Profile, create_default_profile, duplicate_profile, load_all_profiles_with_errors,
@@ -212,27 +213,25 @@ class Editor(QObject):
         old = (self._saved.get(id(p)) or {}).get("name")
         try:
             p.save()
-            if old and old != p.name:
-                old_gkey_actions = {
-                    address: dict(action)
-                    for address, action in self._gkey_actions.items()
-                }
-                if rename_profile_target(self._gkey_actions, old, p.name):
-                    if not self._save_gkey_actions():
-                        self._gkey_actions = old_gkey_actions
-                        return False
+        except OSError as e:
+            self.message.emit(f"Could not save: {e.strerror or e}")
+            return False
 
-            if old and old != p.name and (self._rules.fallback == old
-                                          or any(r.profile == old for r in self._rules.rules)):
+        if old and old != p.name:
+            if rename_profile_target(self._gkey_actions, old, p.name):
+                self._save_gkey_actions()
+
+            if (self._rules.fallback == old
+                    or any(r.profile == old for r in self._rules.rules)):
                 for r in self._rules.rules:
                     if r.profile == old:
                         r.profile = p.name
                 if self._rules.fallback == old:
                     self._rules.fallback = p.name
-                self._store_rules()
-        except OSError as e:
-            self.message.emit(f"Could not save: {e.strerror or e}")
-            return False
+                try:
+                    self._store_rules()
+                except OSError as e:
+                    self.message.emit(f"Could not save: {e.strerror or e}")
 
         self._saved[id(p)] = p.to_dict()
         self._push.stop()
@@ -402,7 +401,7 @@ class Editor(QObject):
 
     @Slot(int, str, str)
     def setGKeyAction(self, address: int, action_type: str, target: str) -> None:
-        if address not in range(0xB4, 0xBD):
+        if address not in GKEY_ADDRESSES:
             return
 
         if action_type == "":
@@ -594,7 +593,7 @@ class Editor(QObject):
             "gkeys": [
                 {
                     "address": address,
-                    "name": f"G{address - 0xB3}",
+                    "name": KEY_BY_ADDRESS[address].name,
                     "type": self._gkey_actions.get(address, {}).get("type", ""),
                     "target": self._gkey_actions.get(address, {}).get("target", ""),
                 }

@@ -10,7 +10,8 @@ GKEYS_PATH = CONFIG_DIR / "gkeys.json"
 GKEY_ADDRESSES = range(0xB4, 0xBD)
 
 
-def _valid_action(action):
+def _valid_action(action: object) -> bool:
+    """Return whether an action is a valid profile switch."""
     if not isinstance(action, dict):
         return False
 
@@ -72,18 +73,13 @@ def rename_profile_target(actions: dict[int, dict], old: str, new: str) -> bool:
     return changed
 
 
-def get_profile_switch_target(actions, address):
+def get_profile_switch_target(
+    actions: dict[int, dict], address: int
+) -> str | None:
+    """Return the target profile for a valid switch action."""
     action = actions.get(address)
 
-    if not isinstance(action, dict):
+    if not _valid_action(action):
         return None
 
-    if action.get("type") != "switch_profile":
-        return None
-
-    target = action.get("target")
-
-    if isinstance(target, str) and target.strip():
-        return target.strip()
-
-    return None
+    return action["target"].strip()

@@ -71,8 +71,8 @@ def test_gkey_action_saves_without_undo(editor):
     editor.setGKeyAction(180, "switch_profile", "Two")
 
     assert editor._gkey_actions[180] == action
-    assert not editor.canUndo
-    assert not editor.canRedo
+    assert not editor.profile["canUndo"]
+    assert not editor.profile["canRedo"]
 
     editor.undo()
     assert editor._gkey_actions[180] == action
