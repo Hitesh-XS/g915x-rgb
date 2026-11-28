@@ -79,4 +79,18 @@ ColumnLayout {
             }
         }
     }
+
+    Kirigami.Separator { Layout.fillWidth: true }
+
+    QQC2.Label {
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+        text: qsTr("To have a G key run a command or script, add it in KDE's shortcut settings: choose Add New, then Command or Script, and press the G key when asked for a shortcut. KDE may show the key under its own name, such as \"Tools\" for G1. That is expected, and the shortcut still works.")
+    }
+
+    QQC2.Button {
+        text: qsTr("Open KDE shortcuts")
+        icon.name: "configure-shortcuts"
+        onClicked: root.editor.openShortcutSettings()
+    }
 }

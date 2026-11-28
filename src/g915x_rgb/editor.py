@@ -432,6 +432,12 @@ class Editor(QObject):
 
         self._refresh()
 
+    @Slot()
+    def openShortcutSettings(self) -> None:
+        """Open KDE's shortcut settings, where G keys can run commands."""
+        if not QProcess.startDetached("systemsettings", ["kcm_keys"])[0]:
+            self.message.emit("Could not open KDE's shortcut settings")
+
     @Slot(str)
     def setPage(self, page: str) -> None:
         self._page = page

@@ -78,6 +78,21 @@ def test_gkey_action_saves_without_undo(editor):
     assert editor._gkey_actions[180] == action
 
 
+def test_shortcut_settings_open_or_report(editor, monkeypatch):
+    import g915x_rgb.editor as module
+    launched, messages = [], []
+    editor.message.connect(messages.append)
+
+    monkeypatch.setattr(module.QProcess, "startDetached",
+                        lambda *args: (launched.append(args), (True, 1))[1])
+    editor.openShortcutSettings()
+    assert launched == [("systemsettings", ["kcm_keys"])] and not messages
+
+    monkeypatch.setattr(module.QProcess, "startDetached", lambda *args: (False, 0))
+    editor.openShortcutSettings()
+    assert messages == ["Could not open KDE's shortcut settings"]
+
+
 def test_blend_spans_the_selection_and_resets(editor):
     editor.selectGroup("fkeys")
     editor.blend("#000000", "#ffffff")
