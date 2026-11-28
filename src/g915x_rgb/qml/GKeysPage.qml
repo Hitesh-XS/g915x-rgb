@@ -13,14 +13,14 @@ ColumnLayout {
     QQC2.Label {
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
-        text: qsTr("Assign an action to each G key. Profile switching is supported in this first version.")
+        text: qsTr("Choose what each G key does. For now, a G key can switch the lighting profile.")
     }
 
     Kirigami.InlineMessage {
         Layout.fillWidth: true
         visible: root.editor.status.typing_available === false
         type: Kirigami.MessageType.Warning
-        text: qsTr("The service cannot read this keyboard's key presses, so G-key macros will not work. See /usr/share/doc/g915x-rgb for how to allow it.")
+        text: qsTr("The service cannot read this keyboard's key presses, so the G keys will not work. See /usr/share/doc/g915x-rgb for how to allow it.")
     }
 
     Repeater {
